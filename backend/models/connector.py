@@ -27,6 +27,7 @@ class Connector(Base):
     )
     type: Mapped[str] = mapped_column(String(32), nullable=False)  # e.g., "postgres", "gdrive"
     config: Mapped[Any] = mapped_column(JSONB, nullable=False)
+    connector_metadata: Mapped[Any] = mapped_column(JSONB, nullable=True)  # For user state/config unrelated to credentials
     status: Mapped[ConnectorStatus] = mapped_column(
         Enum(ConnectorStatus, name="connectorstatus", values_callable=lambda enum: [e.value for e in enum]),
         default=ConnectorStatus.FAILED,

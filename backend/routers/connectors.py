@@ -2,7 +2,7 @@
 Connectors API endpoints
 Production-grade: FastAPI router, error handling, type hints, MCP connection logic (pilot version)
 """
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Request
 from sqlalchemy.orm import Session
 from uuid import UUID
 from typing import Optional
@@ -16,6 +16,10 @@ from schemas.connector import (
     ConnectorCreateRequest, ConnectorCreateResponse, ConnectorListResponse, ConnectorSummary,
     ConnectorType
 )
+
+import os
+from urllib.parse import urlencode
+from fastapi.responses import RedirectResponse
 
 import requests
 
@@ -35,7 +39,182 @@ def test_mcp_connection_and_fetch_schema(conn_type: str, config: dict) -> tuple[
     except Exception as e:
         return False, None, str(e)
 
+# ----------------- Root-level OAuth endpoints ----------------
+oauth_router = APIRouter()
+
+@oauth_router.get("/connectors/google-drive/authorize")
+def google_drive_authorize(request: Request):
+    """
+    Begins the Google OAuth flow for Google Drive. Redirects to Google's OAuth2.0 consent screen.
+    Expects tenant_id as query param; builds state param with nonce+tenant_id for CSRF protection.
+    """
+    import secrets
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI")
+    tenant_id = request.query_params.get("tenant_id")
+    if not client_id or not redirect_uri:
+        raise HTTPException(status_code=500, detail="OAuth env not configured")
+    if tenant_id is None:
+        raise HTTPException(status_code=400, detail="Missing tenant_id query parameter")
+    scope = "https://www.googleapis.com/auth/drive.readonly"
+    # Secure random CSRF token (nonce)
+    csrf_token = secrets.token_urlsafe(16)
+    state = f"{csrf_token}:{tenant_id}"
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "access_type": "offline",
+        "scope": scope,
+        "prompt": "consent",
+        "include_granted_scopes": "true",
+        "state": state,
+    }
+    url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
+    return RedirectResponse(url)
+
+@oauth_router.get("/connectors/google-drive/callback")
+def google_drive_callback(request: Request, db: Session = Depends(get_db)):
+    """
+    Handles the OAuth2 callback after Google user authorizes this app.
+    Parses tenant_id from state, verifies token, handles code exchange and connector DB save.
+    """
+    import requests as pyrequests
+    import os
+    from datetime import datetime, timedelta
+    from models.connector import ConnectorStatus, Connector
+    from schemas.connector import ConnectorType
+    from uuid import uuid4
+
+    code = request.query_params.get("code")
+    error = request.query_params.get("error")
+    state = request.query_params.get("state")
+    if error:
+        raise HTTPException(status_code=400, detail=f"OAuth error: {error}")
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing authorization code (OAuth callback)")
+    if not state or ":" not in state:
+        raise HTTPException(status_code=400, detail="Invalid state param (missing tenant id)")
+    csrf_token, tenant_id = state.split(":", 1)
+    # TODO: validate CSRF/nonce if tracking sessions
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI")
+    if not all([client_id, client_secret, redirect_uri]):
+        raise HTTPException(status_code=500, detail="Google OAuth env not configured")
+    # Exchange code for tokens
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
+        "grant_type": "authorization_code"
+    }
+    token_resp = pyrequests.post(token_url, data=data, timeout=8)
+    if token_resp.status_code != 200:
+        raise HTTPException(status_code=400, detail=f"Token exchange failed: {token_resp.text}")
+    token_json = token_resp.json()
+    # tokens
+    access_token = token_json.get("access_token")
+    refresh_token = token_json.get("refresh_token")
+    expires_in = token_json.get("expires_in")
+    expiry = datetime.utcnow() + timedelta(seconds=expires_in) if expires_in else None
+    if not access_token or not refresh_token:
+        raise HTTPException(status_code=400, detail="Did not receive access/refresh token from Google.")
+    # Store a new Connector in DB (status=ACTIVE)
+    now = datetime.utcnow()
+    connector = Connector(
+        connector_id=uuid4(),
+        tenant_id=tenant_id,
+        type=ConnectorType.GOOGLE_DRIVE.value,
+        config={
+            # Don't persist access_token beyond expiry; refresh_token is for renewals
+            "oauth_access_token": access_token,
+            "oauth_refresh_token": refresh_token,
+            "token_expiry": expiry.isoformat() if expiry else None
+        },
+        status=ConnectorStatus.ACTIVE,
+        created_at=now,
+        updated_at=now,
+        last_schema_fetch=None # will be fetched in MCP step
+    )
+    db.add(connector)
+    db.commit()
+    # Optional: redirect back to frontend with connector_id as param
+    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000/dashboard?gdrive=success")
+    return RedirectResponse(frontend_url)
+
+# Original connectors CRUD API
 router = APIRouter(prefix="/tenants/{tenant_id}/connectors", tags=["Connectors"])
+
+import google.auth.transport.requests
+from google.oauth2.credentials import Credentials as GoogleCredentials
+from googleapiclient.discovery import build as google_build
+import pandas as pd
+import random
+import io
+import requests as pyrequests
+
+from mcp.google_drive import GoogleDriveMCPAdapter
+
+@router.get("/{connector_id}/google-drive-files", summary="List Google Drive files for a connector", response_model=list)
+def list_google_drive_files(
+    tenant_id: str,
+    connector_id: str,
+    db: Session = Depends(get_db)
+):
+    from models.connector import Connector
+    # Find connector for this tenant
+    connector = db.query(Connector).filter_by(connector_id=connector_id, tenant_id=tenant_id).first()
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    # Only allow for Google Drive connectors
+    if connector.type not in ("gdrive", "google_drive", "GOOGLE_DRIVE"):
+        raise HTTPException(status_code=400, detail="Connector is not Google Drive type")
+    try:
+        files = GoogleDriveMCPAdapter.list_files(connector.config)
+        return files
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Google Drive API error: {str(e)}")
+
+@router.post("/{connector_id}/fetch-schema")
+def fetch_connector_schema(
+    tenant_id: str,
+    connector_id: str,
+    db: Session = Depends(get_db)
+):
+    """
+    Fetches schema for connector via MCP adapter. Stores as canonical schema for this connector.
+    """
+    from models.connector import Connector
+    from models.schema import Schema
+    from datetime import datetime
+    from schemas.connector import ConnectorType
+    from mcp import get_adapter
+
+    conn = db.query(Connector).filter_by(connector_id=connector_id, tenant_id=tenant_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    try:
+        mcp_adapter = get_adapter(conn.type)
+        mcp_schema = mcp_adapter.fetch_schema(conn.config, conn.connector_metadata)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"MCP fetch_schema failed: {e}")
+
+    # Save to DB
+    now = datetime.utcnow()
+    schema = Schema(
+        connector_id=conn.connector_id,
+        tenant_id=tenant_id,
+        raw_schema={"schema": mcp_schema, "fetched_at": now.isoformat()},
+        fetched_at=now
+    )
+    db.add(schema)
+    conn.last_schema_fetch = now
+    db.commit()
+    return {"schema": mcp_schema, "fetched_at": now.isoformat()}
 
 @router.post("", response_model=ConnectorCreateResponse, status_code=status.HTTP_201_CREATED)
 def create_connector(
@@ -110,6 +289,8 @@ def list_connectors(
             last_schema_fetch=conn.last_schema_fetch.isoformat() if conn.last_schema_fetch else None,
             error_message=conn.error_message,
             schema=schema_info,
+            config=conn.config,
+            connector_metadata=conn.connector_metadata
         ))
     return ConnectorListResponse(connectors=result)
 
@@ -155,3 +336,230 @@ def retest_connector(
             "error": connector.error_message,
             "schema": None,
         })
+
+
+# --- Canonical Schema fetch for a connector (NESTED ROUTE, replaces top-level) ---
+from schemas.schema import SchemaRead
+import jwt
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from schemas.connector import ConnectorSummary
+
+JWT_SECRET = os.getenv("JWT_SECRET", "insecure-placeholder-change-in-env")
+JWT_ALGORITHM = "HS256"
+
+import logging
+
+def check_auth_and_tenant(credentials: HTTPAuthorizationCredentials, tenant_id: str) -> dict:
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception as e:
+        logging.error(f"JWT decode failed: {e}")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials")
+    if "tenant" not in payload or "tenant_id" not in payload["tenant"] or str(payload["tenant"]["tenant_id"]) != str(tenant_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant context missing or mismatch in token")
+    return {"tenant_id": payload["tenant"]["tenant_id"], "user": payload.get("user")}
+
+@router.put(
+    "/{connector_id}",
+    summary="Update connector (partial or full, including config/metadata)",
+    tags=["Connectors"],
+    response_model=ConnectorSummary,
+    response_description="The updated connector.",
+    responses={
+        200: {
+            "description": "The updated connector.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "connector_id": "e8ab50c8-52dd-4872-a9e5-7effa1802164",
+                        "type": "gdrive",
+                        "status": "active",
+                        "last_schema_fetch": "2025-08-13T22:32:12.123Z",
+                        "error_message": None,
+                        "schema": {
+                          "schema_id": "c5b4ebcb-5959-41c0-8cc9-1e4b2bc3e0f4",
+                          "fetched_at": "2025-08-13T18:54:23.690Z",
+                          "raw_schema": {"entity":"Invoice","fields":[{"name":"id","type":"string"}]}
+                        },
+                        "config": {
+                          "oauth_access_token": "...",
+                          "selected_drive_file_ids": ["1abCDe...", "1FghIjkl..."]
+                        }
+                    }
+                }
+            }
+        },
+        404: {"description": "Connector not found."},
+        403: {"description": "Forbidden tenant."}
+    },
+)
+def update_connector(
+    tenant_id: str,
+    connector_id: str,
+    request: ConnectorCreateRequest,  # Accepts full config object
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    """
+    Updates a connector (full or partial update, including metadata/config JSON).
+    - For Google Drive connectors, this allows updating 'selected_drive_file_ids' inside config.
+    - For future connectors, use connector-specific keys inside config/metadata.
+    - No backend validation for those subfields at this time (frontend responsibility).
+    - Existing keys in config are preserved if not overwritten.
+    - Returns the updated connector (with config).
+
+    Example config for updating Drive file selection:
+    {
+        "type": "gdrive",
+        "config": {
+            ...,
+            "selected_drive_file_ids": ["id1", "id2", ...]
+        }
+    }
+    """
+    check_auth_and_tenant(credentials, tenant_id)
+    connector = db.query(Connector).filter_by(tenant_id=tenant_id, connector_id=connector_id).first()
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    connector.type = request.type.value
+    # Merge old config with new keys (for partial update flexibility)
+    old_config = dict(connector.config or {})
+    next_config = dict(request.config or {})
+    old_config.update(next_config)  # Partial update: merge new keys/values into existing
+    connector.config = old_config
+    connector.updated_at = datetime.utcnow()
+    db.commit()
+    last_schema = db.query(Schema).filter_by(
+        connector_id=connector.connector_id
+    ).order_by(Schema.fetched_at.desc()).first()
+    schema_info = None
+    if last_schema:
+        schema_info = {
+            "schema_id": last_schema.schema_id,
+            "fetched_at": last_schema.fetched_at.isoformat(),
+            "raw_schema": last_schema.raw_schema,
+        }
+    return ConnectorSummary(
+        connector_id=connector.connector_id,
+        type=connector.type,
+        status=connector.status.value,
+        last_schema_fetch=connector.last_schema_fetch.isoformat() if connector.last_schema_fetch else None,
+        error_message=connector.error_message,
+        schema=schema_info,
+        config=connector.config,
+        connector_metadata=connector.connector_metadata,
+    )
+
+
+@router.patch(
+    "/{connector_id}",
+    summary="Partially update connector fields.",
+    tags=["Connectors"],
+    response_model=ConnectorSummary,
+    response_description="The updated connector.",
+    responses={
+        200: {"description": "The updated connector.", "content": {"application/json": {"example": {}}}},
+        404: {"description": "Connector not found."},
+        403: {"description": "Forbidden tenant."}
+    },
+)
+def patch_connector(
+    tenant_id: str,
+    connector_id: str,
+    patch_data: dict,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    """
+    PATCH endpoint: partial update to any mutable field (connector_metadata, config, status, type, etc).
+    Only included fields are updated. Missing fields are left as is.
+    """
+    check_auth_and_tenant(credentials, tenant_id)
+    connector = db.query(Connector).filter_by(tenant_id=tenant_id, connector_id=connector_id).first()
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    allowed_fields = ["connector_metadata", "config", "status", "type"]
+    made_update = False
+    for key in allowed_fields:
+        if key in patch_data and patch_data[key] is not None:
+            setattr(connector, key, patch_data[key])
+            made_update = True
+    if not made_update:
+        raise HTTPException(status_code=400, detail="No updatable fields present in patch body.")
+    connector.updated_at = datetime.utcnow()
+    db.commit()
+    last_schema = db.query(Schema).filter_by(
+        connector_id=connector.connector_id
+    ).order_by(Schema.fetched_at.desc()).first()
+    schema_info = None
+    if last_schema:
+        schema_info = {
+            "schema_id": last_schema.schema_id,
+            "fetched_at": last_schema.fetched_at.isoformat(),
+            "raw_schema": last_schema.raw_schema,
+        }
+    return ConnectorSummary(
+        connector_id=connector.connector_id,
+        type=connector.type,
+        status=connector.status.value,
+        last_schema_fetch=connector.last_schema_fetch.isoformat() if connector.last_schema_fetch else None,
+        error_message=connector.error_message,
+        schema=schema_info,
+        config=connector.config,
+        connector_metadata=connector.connector_metadata,
+    )
+
+@router.get(
+    "/{connector_id}/schemas/{schema_id}",
+    response_model=SchemaRead,
+    summary="Fetch canonical schema for a connector (tenant- and connector-scoped)",
+    tags=["Connectors"],
+    response_description="Canonical schema with connector, tenant, fetched time, and canonical fields.",
+    responses={
+        200: {
+            "description": "The canonical schema object identified by connector and schema_id, if authorized.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "schema_id": "c5b4ebcb-5959-41c0-8cc9-1e4b2bc3e0f4",
+                        "connector_id": "8c2be193-b8dd-4bbd-8d9a-1f8c7e47ce70",
+                        "tenant_id": "4d35dbe2-ff78-4e68-9797-70d484fcc394",
+                        "raw_schema": {
+                          "entity": "Invoice",
+                          "fields": [
+                            {"name": "invoice_id", "type": "string", "sources": ["c-234.invoices.id"], "confidence": 0.98},
+                            {"name": "amount", "type": "decimal", "sources": ["c-234.invoices.total"], "confidence": 0.96}
+                          ]
+                        },
+                        "fetched_at": "2025-08-13T18:54:23.690Z"
+                    }
+                }
+            }
+        },
+        404: {"description": "Not found - No schema with this ID exists for this connector."},
+        403: {"description": "Forbidden - This schema exists, but you do not have access (wrong tenant)."}
+    },
+)
+def get_schema_for_connector(
+    tenant_id: str,
+    connector_id: str,
+    schema_id: str,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    """
+    Fetch and return canonical schema for a given connector.
+    - Enforces tenant isolation and connector-scoping.
+    - Returns 200 when both connector_id and schema_id belong to this tenant and match.
+    - 404 if schema_id does not exist for this connector.
+    - 403 if tenant mismatch.
+    """
+    check_auth_and_tenant(credentials, tenant_id)
+    schema = db.query(Schema).filter(
+        Schema.schema_id == schema_id,
+        Schema.connector_id == connector_id,
+        Schema.tenant_id == tenant_id,
+    ).first()
+    if not schema:
+        raise HTTPException(status_code=404, detail="Schema not found for this connector")
+    return SchemaRead.model_validate(schema)
