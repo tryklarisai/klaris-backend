@@ -8,12 +8,17 @@ import {
   TextField,
   Button,
   Alert,
-  CircularProgress,
+  IconButton,
+  InputAdornment,
 } from "@mui/material";
+import { LoadingButton } from "@mui/lab";
+import Visibility from '@mui/icons-material/Visibility';
+import VisibilityOff from '@mui/icons-material/VisibilityOff';
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
+import { buildApiUrl } from "../config";
 
-const API_URL = process.env.REACT_APP_API_URL || "http://localhost:8000";
+const API_URL = buildApiUrl("");
 
 type FormState = {
   tenant_name: string;
@@ -30,6 +35,7 @@ export default function LoginPage() {
   });
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [showPw, setShowPw] = useState(false);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setForm({ ...form, [e.target.name]: e.target.value });
@@ -108,23 +114,32 @@ export default function LoginPage() {
                 margin="normal"
                 label="Password"
                 name="password"
-                type="password"
+                type={showPw ? 'text' : 'password'}
                 value={form.password}
                 onChange={handleChange}
                 required
+                InputProps={{
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <IconButton aria-label="toggle password visibility" onClick={() => setShowPw(v => !v)} edge="end">
+                        {showPw ? <VisibilityOff /> : <Visibility />}
+                      </IconButton>
+                    </InputAdornment>
+                  )
+                }}
               />
               <Box mt={2}>
-                <Button
+                <LoadingButton
                   variant="contained"
                   color="primary"
                   type="submit"
                   fullWidth
-                  disabled={loading}
+                  loading={loading}
+                  loadingPosition="start"
                   size="large"
-                  startIcon={loading ? <CircularProgress size={20} /> : null}
                 >
-                  {loading ? "Signing in..." : "Login"}
-                </Button>
+                  Login
+                </LoadingButton>
               </Box>
             </form>
             <Box mt={2} textAlign="center">

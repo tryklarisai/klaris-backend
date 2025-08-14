@@ -36,6 +36,7 @@ class ConnectorSummary(BaseModel):
     connector_id: UUID
     type: ConnectorType
     status: ConnectorStatus
+    created_at: Optional[str] = None
     last_schema_fetch: Optional[str] = None
     error_message: Optional[str] = None
     schema: Optional[ConnectorSchemaInfo] = None

@@ -2,7 +2,7 @@
 Connectors API endpoints
 Production-grade: FastAPI router, error handling, type hints, MCP connection logic (pilot version)
 """
-from fastapi import APIRouter, HTTPException, Depends, status, Request
+from fastapi import APIRouter, HTTPException, Depends, status, Request, Query
 from sqlalchemy.orm import Session
 from uuid import UUID
 from typing import Optional
@@ -199,7 +199,8 @@ def list_google_drive_files(
 def fetch_connector_schema(
     tenant_id: str,
     connector_id: str,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    full: bool = Query(False, description="When true, ignores saved selection filters and returns full schema")
 ):
     """
     Fetches schema for connector via MCP adapter. Stores as canonical schema for this connector.
@@ -216,7 +217,11 @@ def fetch_connector_schema(
 
     try:
         mcp_adapter = get_adapter(conn.type)
-        mcp_schema = mcp_adapter.fetch_schema(conn.config, conn.connector_metadata)
+        # For refresh endpoint: by default apply saved selection filters so the
+        # canonical schema reflects the user's selected entities. If `full=true`,
+        # ignore filters and return the complete schema (used by UI for editing).
+        metadata = None if full else conn.connector_metadata
+        mcp_schema = mcp_adapter.fetch_schema(conn.config, metadata)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"MCP fetch_schema failed: {e}")
 
@@ -286,6 +291,7 @@ def list_connectors(
             connector_id=conn.connector_id,
             type=conn.type,
             status=conn.status.value,
+            created_at=conn.created_at.isoformat() if getattr(conn, 'created_at', None) else None,
             last_schema_fetch=conn.last_schema_fetch.isoformat() if conn.last_schema_fetch else None,
             error_message=conn.error_message,
             schema=schema_info,
@@ -443,6 +449,7 @@ def update_connector(
         connector_id=connector.connector_id,
         type=connector.type,
         status=connector.status.value,
+        created_at=connector.created_at.isoformat() if getattr(connector, 'created_at', None) else None,
         last_schema_fetch=connector.last_schema_fetch.isoformat() if connector.last_schema_fetch else None,
         error_message=connector.error_message,
         schema=schema_info,
@@ -502,6 +509,7 @@ def patch_connector(
         connector_id=connector.connector_id,
         type=connector.type,
         status=connector.status.value,
+        created_at=connector.created_at.isoformat() if getattr(connector, 'created_at', None) else None,
         last_schema_fetch=connector.last_schema_fetch.isoformat() if connector.last_schema_fetch else None,
         error_message=connector.error_message,
         schema=schema_info,

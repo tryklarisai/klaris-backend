@@ -6,13 +6,19 @@ import {
   CardContent,
   Typography,
   TextField,
-  Button,
   MenuItem,
   Alert,
-  CircularProgress,
+  InputAdornment,
+  IconButton,
+  LinearProgress,
+  Button,
 } from "@mui/material";
+import { LoadingButton } from "@mui/lab";
+import Visibility from '@mui/icons-material/Visibility';
+import VisibilityOff from '@mui/icons-material/VisibilityOff';
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
+import { buildApiUrl } from "../config";
 
 const plans = [
   { value: "pilot", label: "Pilot" },
@@ -24,7 +30,7 @@ const plans = [
 const isPasswordValid = (password: string) =>
   /^(?=.*[A-Za-z])(?=.*\d)(?=.*[^A-Za-z\d]).{8,}$/.test(password);
 
-const API_URL = process.env.REACT_APP_API_URL || "http://localhost:8000";
+const API_URL = buildApiUrl("");
 
 type FormState = {
   name: string;
@@ -46,6 +52,7 @@ export default function RegisterPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
+  const [showPw, setShowPw] = useState(false);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setForm({ ...form, [e.target.name]: e.target.value });
@@ -188,24 +195,36 @@ export default function RegisterPage() {
                 margin="normal"
                 label="Root User Password"
                 name="root_user_password"
-                type="password"
+                type={showPw ? 'text' : 'password'}
                 value={form.root_user_password}
                 onChange={handleChange}
                 required
                 helperText="Min. 8 characters, at least one letter, number, and symbol."
+                InputProps={{
+                  endAdornment: (
+                    <InputAdornment position="end">
+                      <IconButton aria-label="toggle password visibility" onClick={() => setShowPw(v => !v)} edge="end">
+                        {showPw ? <VisibilityOff /> : <Visibility />}
+                      </IconButton>
+                    </InputAdornment>
+                  )
+                }}
               />
+              <Box mt={1}>
+                <LinearProgress variant="determinate" value={Math.min(100, form.root_user_password.length * 10)} aria-label="password strength" />
+              </Box>
               <Box mt={2}>
-                <Button
+                <LoadingButton
                   variant="contained"
                   color="primary"
                   type="submit"
                   fullWidth
-                  disabled={loading}
+                  loading={loading}
+                  loadingPosition="start"
                   size="large"
-                  startIcon={loading ? <CircularProgress size={20} /> : null}
                 >
-                  {loading ? "Registering..." : "Register Tenant"}
-                </Button>
+                  Register Tenant
+                </LoadingButton>
               </Box>
             </form>
           </CardContent>

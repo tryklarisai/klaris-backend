@@ -1,14 +1,16 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
-  Box, Button, Card, CardContent, Typography, Alert, CircularProgress, Chip, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemIcon, ListItemText, Checkbox, Stack
+  Box, Button, Typography, Alert, CircularProgress, Chip, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemIcon, ListItemText, Checkbox, Stack, Tabs, Tab, Tooltip, TextField, MenuItem,
+  Table, TableHead, TableRow, TableCell, TableBody
 } from '@mui/material';
-import Grid from '@mui/material/Grid';
-import ReactJson from 'react-json-view';
-// Divider imported only once below
-import Divider from '@mui/material/Divider';
+import JsonView from 'react18-json-view';
+import 'react18-json-view/src/style.css';
+import { SnackbarContext } from '../ui/SnackbarProvider';
+// Alignments only; no Grid needed here
+import { buildApiUrl } from '../config';
 
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const API_URL = buildApiUrl('');
 
 function redactConfig(config: any) {
   if (!config) return {};
@@ -34,6 +36,7 @@ export default function ConnectorDetailPage() {
 const [schema, setSchema] = useState<any>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [schemaError, setSchemaError] = useState<string | null>(null);
+  const [tab, setTab] = useState(0);
 
   // Google Drive file picker states
   // 'drive' | 'postgres' | false
@@ -43,11 +46,15 @@ const [schema, setSchema] = useState<any>(null);
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
   const [savingSelection, setSavingSelection] = useState(false);
+  const [selectedDriveRows, setSelectedDriveRows] = useState<GoogleDriveFile[]>([]);
+  const [selectedTableRows, setSelectedTableRows] = useState<string[]>([]);
 const [retesting, setRetesting] = useState(false);
 const [retestMessage, setRetestMessage] = useState<string | null>(null);
 const [fetchingSchema, setFetchingSchema] = useState(false);
 const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
-const [schemaModalOpen, setSchemaModalOpen] = useState(false);
+  const [schemaModalOpen, setSchemaModalOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState<boolean | number>(2);
+  const { notify } = React.useContext(SnackbarContext);
 
   useEffect(() => {
     const tStr = window.localStorage.getItem('klaris_tenant');
@@ -63,6 +70,38 @@ const [schemaModalOpen, setSchemaModalOpen] = useState(false);
     if (tenantId && connectorId) fetchDetail();
     // eslint-disable-next-line
   }, [tenantId, connectorId]);
+
+  // Auto-load full schema when switching to Schema tab
+  useEffect(() => {
+    const loadSchemaIfNeeded = async () => {
+      if (tab !== 2) return;
+      if (!tenantId || !connectorId) return;
+      const schemaId = data?.schema?.schema_id;
+      // If we already have raw_schema in state or in data, no need to fetch
+      if (!schemaId || schema?.raw_schema || data?.schema?.raw_schema) return;
+      try {
+        setSchemaLoading(true);
+        setSchemaError(null);
+        const token = window.localStorage.getItem('klaris_jwt');
+        const resp = await fetch(
+          `${API_URL}/tenants/${tenantId}/connectors/${connectorId}/schemas/${schemaId}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (!resp.ok) {
+          const result = await resp.json();
+          throw new Error(result?.detail || 'Failed to fetch schema');
+        }
+        const result = await resp.json();
+        setSchema(result);
+      } catch (err: any) {
+        setSchemaError(err.message || 'Failed to fetch schema');
+      } finally {
+        setSchemaLoading(false);
+      }
+    };
+    loadSchemaIfNeeded();
+    // eslint-disable-next-line
+  }, [tab, tenantId, connectorId, data?.schema?.schema_id]);
 
   const fetchDetail = async () => {
     if (!tenantId || !connectorId) return;
@@ -117,13 +156,16 @@ const [schemaModalOpen, setSchemaModalOpen] = useState(false);
     setSchemaMessage(null);
     try {
       const token = window.localStorage.getItem('klaris_jwt');
+      // For refresh: use filtered fetch (respect saved selection)
       const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}/fetch-schema`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
       const result = await resp.json();
       if (!resp.ok) throw new Error(result?.detail || 'Failed to fetch schema');
-      setSchema({ raw_schema: result.schema, fetched_at: result.fetched_at });
+      const pretty = { raw_schema: result.schema, fetched_at: result.fetched_at };
+      setSchema(pretty);
+      setData((d: any) => ({ ...(d || {}), schema: pretty, last_schema_fetch: result.fetched_at }));
       setSchemaMessage('Schema fetched successfully');
       fetchDetail(); // update display
     } catch (err: any) {
@@ -146,6 +188,10 @@ const [schemaModalOpen, setSchemaModalOpen] = useState(false);
       const result = await resp.json();
       setDriveFiles(result || []);
       setSelectedIds(data?.connector_metadata?.selected_drive_file_ids || []);
+      try {
+        const sel = (data?.connector_metadata?.selected_drive_file_ids || []) as string[];
+        setSelectedDriveRows((result || []).filter((f: any) => sel.includes(f.id)));
+      } catch {}
     } catch (err: any) {
       setFilesError(err.message || 'Failed to fetch files');
     } finally {
@@ -153,202 +199,274 @@ const [schemaModalOpen, setSchemaModalOpen] = useState(false);
     }
   }
 
-  return (
-    <Box sx={{ mt: 2, maxWidth: 800, mx: 'auto' }}>
-      <Button
-        variant="outlined"
-        size="small"
-        sx={{ mb: 2 }}
-        onClick={() => navigate('/connectors')}
-        color="secondary"
-      >
-        Back to Connectors
-      </Button>
-      {loading ? <CircularProgress /> : error ? <Alert severity="error">{error}</Alert> : (
-        <Card>
-          <CardContent>
-            {/* Details Section */}
-            <Typography variant="h5" mb={1}>
-              Connector Detail
-              <Chip label={data.status} color={data.status === 'active' ? 'success' : 'error'} sx={{ ml: 2 }} />
-            </Typography>
-            <Typography variant="body2" color="text.secondary" mb={1}>ID: {data.connector_id}</Typography>
-            <Typography variant="body2" mb={1}><b>Type:</b> {data.type}</Typography>
-            <Typography variant="body2" mb={1}><b>Last Schema Fetch:</b> {data.last_schema_fetch ? new Date(data.last_schema_fetch).toLocaleString() : 'Never'}</Typography>
-            {data.error_message && (
-              <Alert severity="warning" sx={{ mt: 1 }}>Error: {data.error_message}</Alert>
-            )}
+  // Prepare selection summaries when the Select tab is active
+  useEffect(() => {
+    if (tab !== 1) return;
+    if (!data) return;
+    if (data.type === 'google_drive') {
+      const sel = data?.connector_metadata?.selected_drive_file_ids || [];
+      setSelectedIds(sel);
+      if (!driveFiles.length) {
+        setFilesLoading(true);
+        fetchDriveFiles();
+      } else {
+        setSelectedDriveRows(driveFiles.filter((f) => sel.includes(f.id)));
+      }
+    } else if (data.type === 'postgres') {
+      const names = data?.connector_metadata?.selected_table_names || [];
+      setSelectedTableRows(names);
+    }
+    // eslint-disable-next-line
+  }, [tab, data, driveFiles.length]);
 
-            <Divider sx={{ my: 2 }} />
-            {/* Connector Config Section */}
-            <Typography fontWeight="bold">Connector Config:</Typography>
-            <pre style={{ background: '#f6f6f6', padding: 10, borderRadius: 4, marginBottom: 0 }}>
-              {JSON.stringify(redactConfig(data.config), null, 2)}
-            </pre>
-            <Divider sx={{ my: 2 }} />
-            {/* Canonical Schema Section */}
+  return (
+    <Box sx={{ width: '100%', py: 1 }}>
+      {loading ? <CircularProgress /> : error ? <Alert severity="error">{error}</Alert> : (
+        <Box>
+          <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 1 }}>
+            <Tab label="Overview" />
+            <Tab label={data.type === 'postgres' ? 'Select Tables' : 'Select Files'} />
+            <Tab label="Schema" />
+          </Tabs>
+
+          {tab === 0 && (
             <Box>
-              <Typography fontWeight="bold" mb={1}>Canonical Schema</Typography>
-              {data.last_schema_fetch ? (
+              {/* Meta grid */}
+              <Box sx={{
+                display: 'grid',
+                gridTemplateColumns: { xs: '1fr', sm: 'repeat(4, minmax(0, 1fr))' },
+                gap: 1,
+                mb: 1,
+              }}>
                 <Box>
-                  <Typography variant="caption" color="text.secondary">Fetched: {data.last_schema_fetch ? new Date(data.last_schema_fetch).toLocaleString() : ''}</Typography>
+                  <Typography variant="caption" color="text.secondary">ID</Typography>
+                  <Typography variant="body2" sx={{ wordBreak: 'break-all' }}>{data.connector_id}</Typography>
                 </Box>
-              ) : (
-                <Typography>No schema available yet.</Typography>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Type</Typography>
+                  <Typography variant="body2">{data.type}</Typography>
+                </Box>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Status</Typography>
+                  <Chip size="small" label={data.status} color={data.status === 'active' ? 'success' : 'error'} />
+                </Box>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Last Schema Fetch</Typography>
+                  <Typography variant="body2">
+                    {data.last_schema_fetch ? (
+                      <Tooltip title={new Date(data.last_schema_fetch).toLocaleString()}>
+                        <span>{new Date(data.last_schema_fetch).toLocaleString()}</span>
+                      </Tooltip>
+                    ) : 'Never'}
+                  </Typography>
+                </Box>
+              </Box>
+              <Typography fontWeight="bold" sx={{ mb: 0.5 }}>Connector Config</Typography>
+              <Box sx={{
+                bgcolor: 'background.default',
+                border: '1px solid',
+                borderColor: 'divider',
+                borderRadius: 1,
+                overflowX: 'auto',
+              }}>
+                <pre style={{ margin: 0, padding: 12 }}>
+{`${JSON.stringify(redactConfig(data.config), null, 2)}`}
+                </pre>
+              </Box>
+              {data.error_message && (
+                <Alert severity="warning" sx={{ mt: 1 }}>Error: {data.error_message}</Alert>
               )}
             </Box>
-            <Divider sx={{ my: 3 }} />
-            {/* Action Bar Section */}
-            <Stack direction="row" gap={2} mt={2} alignItems="center" flexWrap="wrap">
-              {data.type === 'google_drive' && (
-                <>
+          )}
+
+            {tab === 2 && (
+              <Box>
+                <Stack direction="row" spacing={1} alignItems="center" mb={1}>
+                  <Button variant="contained" onClick={handleFetchSchema} disabled={fetchingSchema}>
+                    {fetchingSchema ? 'Refreshing…' : 'Refresh Schema'}
+                  </Button>
+                  <Typography variant="body2" color="text.secondary">
+                    Last fetched: {data.last_schema_fetch ? new Date(data.last_schema_fetch).toLocaleString() : 'Never'}
+                  </Typography>
+                  <Box sx={{ flex: 1 }} />
+                  <TextField
+                    select
+                    size="small"
+                    label="Collapse"
+                    value={typeof collapsed === 'number' ? String(collapsed) : collapsed ? 'all' : 'none'}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === 'all') setCollapsed(true);
+                      else if (v === 'none') setCollapsed(false);
+                      else setCollapsed(Number(v));
+                    }}
+                    sx={{ width: 140 }}
+                  >
+                    <MenuItem value="none">None</MenuItem>
+                    <MenuItem value="1">Level 1</MenuItem>
+                    <MenuItem value="2">Level 2</MenuItem>
+                    <MenuItem value="3">Level 3</MenuItem>
+                    <MenuItem value="all">All</MenuItem>
+                  </TextField>
                   <Button
                     variant="outlined"
+                    size="small"
                     onClick={() => {
-                      setSelectModalOpen('drive');
-                      setFilesLoading(true);
-                      setFilesError(null);
-                      fetchDriveFiles();
+                      const obj = schema?.raw_schema || data?.schema?.raw_schema;
+                      if (!obj) return;
+                      try {
+                        navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
+                        notify('Schema copied to clipboard', 'success');
+                      } catch {
+                        notify('Copy failed', 'error');
+                      }
                     }}
                   >
-                    {data?.connector_metadata?.selected_drive_file_ids?.length
-                      ? `Edit Google Drive Selection (${data.connector_metadata.selected_drive_file_ids.length} selected)`
-                      : 'Select Google Drive Files/Folders'}
+                    Copy all
                   </Button>
-                  {data?.connector_metadata?.selected_drive_file_ids?.length > 0 && (
-                    <Chip
-                      label={`${data.connector_metadata.selected_drive_file_ids.length} items selected`}
-                      color="info"
-                      sx={{ ml: 1 }}
-                    />
+                </Stack>
+                {(schemaMessage) && <Alert severity={schemaMessage.includes('success') ? 'success' : 'error'} sx={{ mb: 1 }}>{schemaMessage}</Alert>}
+                <Box sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1, bgcolor: 'background.default', minHeight: 120 }}>
+                  {schemaLoading ? (
+                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', py: 3 }}>
+                      <CircularProgress size={24} />
+                    </Box>
+                  ) : schemaError ? (
+                    <Alert severity="error" sx={{ m: 1 }}>{schemaError}</Alert>
+                  ) : (schema?.raw_schema || data?.schema?.raw_schema) ? (
+                    <Box sx={{ p: 1.5 }}>
+                      <JsonView
+                        src={schema?.raw_schema || data?.schema?.raw_schema}
+                        theme="github"
+                        collapsed={collapsed}
+                        enableClipboard
+                      />
+                    </Box>
+                  ) : (
+                    <Typography variant="body2" color="text.secondary" sx={{ p: 2 }}>
+                      No schema available yet. Click Refresh Schema to fetch.
+                    </Typography>
                   )}
+                </Box>
+              </Box>
+            )}
+
+            {tab === 1 && (
+              <Stack direction="column" gap={1} mt={1}>
+              {data.type === 'google_drive' && (
+                <>
+                  <Stack direction="row" gap={1} alignItems="center">
+                    <Button
+                      variant="outlined"
+                      onClick={() => {
+                        setSelectModalOpen('drive');
+                        setFilesLoading(true);
+                        setFilesError(null);
+                        fetchDriveFiles();
+                      }}
+                    >
+                      {data?.connector_metadata?.selected_drive_file_ids?.length
+                        ? 'Edit Selection'
+                        : 'Select Google Drive Files/Folders'}
+                    </Button>
+                    {data?.connector_metadata?.selected_drive_file_ids?.length > 0 && (
+                      <Chip label={`${data.connector_metadata.selected_drive_file_ids.length} items`} color="info" size="small" />
+                    )}
+                  </Stack>
+                  <Box>
+                    <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Selected Files</Typography>
+                    {filesLoading ? (
+                      <CircularProgress size={22} />
+                    ) : (selectedDriveRows.length > 0 ? (
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>Name</TableCell>
+                            <TableCell>Type</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {selectedDriveRows.map((f) => (
+                            <TableRow key={f.id}>
+                              <TableCell>{f.name}</TableCell>
+                              <TableCell>{f.mimeType}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    ) : (
+                      <Typography variant="body2" color="text.secondary">No files selected.</Typography>
+                    ))}
+                  </Box>
                 </>
               )}
 
               {/* Postgres table selection support */}
               {data.type === 'postgres' && (
                 <>
-                  <Button
-                    variant="outlined"
-                    onClick={async () => {
-                      setSelectModalOpen('postgres');
-                      // Fetch table list from the backend (schema.raw_schema.tables)
-                      let tables: any[] = [];
-                      try {
-                        setFilesLoading(true);
-                        setFilesError(null);
-                        // Use the latest schema on this page; else hit fetch-schema
-                        if (data?.schema?.raw_schema?.tables) {
-                          tables = data.schema.raw_schema.tables;
-                        } else {
-                          // Fetch from /fetch-schema if not present
+                  <Stack direction="row" gap={1} alignItems="center">
+                    <Button
+                      variant="outlined"
+                      onClick={async () => {
+                        // Always fetch latest full table list from backend, do not use cached schema
+                        setSelectModalOpen('postgres');
+                        try {
+                          setFilesLoading(true);
+                          setFilesError(null);
                           const token = window.localStorage.getItem('klaris_jwt');
                           const resp = await fetch(
-                            `${API_URL}/tenants/${tenantId}/connectors/${data.connector_id}/fetch-schema`,
+                            `${API_URL}/tenants/${tenantId}/connectors/${data.connector_id}/fetch-schema?full=true`,
                             { method: 'POST', headers: { Authorization: `Bearer ${token}` } }
                           );
                           const result = await resp.json();
+                          let tables: any[] = [];
                           if (result?.schema?.tables) tables = result.schema.tables;
                           else if (result?.files) tables = result.files; // fallback to files
+                          setDriveFiles((tables || []).map((t: any) => ({ id: t.table, name: t.table, mimeType: t.schema })));
+                          setSelectedIds(data?.connector_metadata?.selected_table_names || []);
+                        } catch (err: any) {
+                          setFilesError('Failed to fetch tables');
+                        } finally {
+                          setFilesLoading(false);
                         }
-                        setDriveFiles((tables || []).map((t: any) => ({ id: t.table, name: t.table, mimeType: t.schema })));
-                        setSelectedIds(data?.connector_metadata?.selected_table_names || []);
-                      } catch (err: any) {
-                        setFilesError('Failed to fetch tables');
-                      } finally {
-                        setFilesLoading(false);
-                      }
-                    }}
-                  >
-                    {data?.connector_metadata?.selected_table_names?.length
-                      ? `Edit Postgres Selection (${data.connector_metadata.selected_table_names.length} selected)`
-                      : 'Select Postgres Tables'}
-                  </Button>
-                  {data?.connector_metadata?.selected_table_names?.length > 0 && (
-                    <Chip
-                      label={`${data.connector_metadata.selected_table_names.length} tables selected`}
-                      color="info"
-                      sx={{ ml: 1 }}
-                    />
-                  )}
+                      }}
+                    >
+                      {data?.connector_metadata?.selected_table_names?.length ? 'Edit Selection' : 'Select Postgres Tables'}
+                    </Button>
+                    {data?.connector_metadata?.selected_table_names?.length > 0 && (
+                      <Chip label={`${data.connector_metadata.selected_table_names.length} tables`} color="info" size="small" />
+                    )}
+                  </Stack>
+                  <Box>
+                    <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Selected Tables</Typography>
+                    {selectedTableRows.length > 0 ? (
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>Table</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {selectedTableRows.map((t) => (
+                            <TableRow key={t}>
+                              <TableCell>{t}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    ) : (
+                      <Typography variant="body2" color="text.secondary">No tables selected.</Typography>
+                    )}
+                  </Box>
                 </>
               )}
-              <Button variant="contained" color="primary" onClick={handleFetchSchema} disabled={fetchingSchema}>
-                {fetchingSchema ? 'Fetching Schema...' : 'Fetch Schema'}
-              </Button>
-              <Button variant="outlined" onClick={handleRetest} disabled={retesting}>Re-test Connector</Button>
-              {retesting && <CircularProgress size={18} sx={{ ml: 1 }} />}
-              <Button
-                onClick={async () => {
-                  // Fetch the canonical schema using the backend endpoint
-                  if (!data?.schema?.schema_id) {
-                    setSchemaError('No schema available.');
-                    setSchemaModalOpen(true);
-                    return;
-                  }
-                  setSchemaLoading(true);
-                  setSchemaError(null);
-                  setSchema(null);
-                  setSchemaModalOpen(true);
-                  try {
-                    const token = window.localStorage.getItem('klaris_jwt');
-                    const resp = await fetch(
-                      `${API_URL}/tenants/${tenantId}/connectors/${data.connector_id}/schemas/${data.schema.schema_id}`,
-                      {
-                        headers: { Authorization: `Bearer ${token}` },
-                      }
-                    );
-                    if (!resp.ok) {
-                      const result = await resp.json();
-                      throw new Error(result?.detail || 'Failed to fetch schema');
-                    }
-                    const result = await resp.json();
-                    setSchema(result);
-                  } catch (err: any) {
-                    setSchemaError(err.message || 'Failed to fetch schema');
-                  } finally {
-                    setSchemaLoading(false);
-                  }
-                }}
-                variant="outlined"
-              >
-                View Schema
-              </Button>
-            </Stack>
-            {(schemaMessage || retestMessage) && <Alert severity={(schemaMessage?.includes('success') || retestMessage?.includes('success')) ? 'success' : 'error'} sx={{ mt: 2 }}>{schemaMessage || retestMessage}</Alert>}
-          </CardContent>
-        </Card>
-      )}
-      {/* Modal to view schema */}
-      <Dialog open={schemaModalOpen} onClose={() => setSchemaModalOpen(false)} maxWidth="md" fullWidth>
-        <DialogTitle>Schema Preview</DialogTitle>
-        <DialogContent>
-          <Box>
-            {schemaLoading ? (
-              <Box sx={{ display: 'flex', justifyContent: 'center', my: 2 }}>
-                <CircularProgress />
-              </Box>
-            ) : schemaError ? (
-              <Alert severity="error">{schemaError}</Alert>
-            ) : schema ? (
-              <ReactJson
-                src={schema.raw_schema || schema}
-                name={false}
-                iconStyle="circle"
-                enableClipboard
-                displayDataTypes={false}
-                collapsed={2}
-                style={{ fontSize: 15 }}
-              />
-            ) : (
-              <Typography variant="body2" color="text.secondary">No schema data.</Typography>
+              {/* Retest and View Schema removed per request */}
+              </Stack>
             )}
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setSchemaModalOpen(false)}>Close</Button>
-        </DialogActions>
-      </Dialog>
+          {(retestMessage) && <Alert severity={retestMessage.includes('success') ? 'success' : 'error'} sx={{ mt: 2 }}>{retestMessage}</Alert>}
+        </Box>
+      )}
+      {/* Schema modal removed in favor of inline view */}
       {/* Google Drive File/Folder Picker Modal */}
       <Dialog open={!!selectModalOpen} onClose={() => setSelectModalOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>
@@ -417,7 +535,13 @@ const [schemaModalOpen, setSchemaModalOpen] = useState(false);
                   }
                 );
                 if (!resp.ok) throw new Error('Failed to save selection');
-                await fetchDetail();
+                    await fetchDetail();
+                    // Refresh inline summaries
+                    if (selectModalOpen === 'drive') {
+                      setSelectedDriveRows(driveFiles.filter((f) => selectedIds.includes(f.id)));
+                    } else {
+                      setSelectedTableRows([...(selectedIds as string[])]);
+                    }
                 setSelectModalOpen(false);
               } catch (err: any) {
                 setFilesError(err.message || 'Failed to save');
