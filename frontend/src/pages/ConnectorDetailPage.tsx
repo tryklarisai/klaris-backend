@@ -36,7 +36,8 @@ const [schema, setSchema] = useState<any>(null);
   const [schemaError, setSchemaError] = useState<string | null>(null);
 
   // Google Drive file picker states
-  const [selectModalOpen, setSelectModalOpen] = useState(false);
+  // 'drive' | 'postgres' | false
+  const [selectModalOpen, setSelectModalOpen] = useState<false | 'drive' | 'postgres'>(false);
   const [driveFiles, setDriveFiles] = useState<GoogleDriveFile[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [filesLoading, setFilesLoading] = useState(false);
@@ -204,7 +205,7 @@ const [schemaModalOpen, setSchemaModalOpen] = useState(false);
                   <Button
                     variant="outlined"
                     onClick={() => {
-                      setSelectModalOpen(true);
+                      setSelectModalOpen('drive');
                       setFilesLoading(true);
                       setFilesError(null);
                       fetchDriveFiles();
@@ -217,6 +218,55 @@ const [schemaModalOpen, setSchemaModalOpen] = useState(false);
                   {data?.connector_metadata?.selected_drive_file_ids?.length > 0 && (
                     <Chip
                       label={`${data.connector_metadata.selected_drive_file_ids.length} items selected`}
+                      color="info"
+                      sx={{ ml: 1 }}
+                    />
+                  )}
+                </>
+              )}
+
+              {/* Postgres table selection support */}
+              {data.type === 'postgres' && (
+                <>
+                  <Button
+                    variant="outlined"
+                    onClick={async () => {
+                      setSelectModalOpen('postgres');
+                      // Fetch table list from the backend (schema.raw_schema.tables)
+                      let tables: any[] = [];
+                      try {
+                        setFilesLoading(true);
+                        setFilesError(null);
+                        // Use the latest schema on this page; else hit fetch-schema
+                        if (data?.schema?.raw_schema?.tables) {
+                          tables = data.schema.raw_schema.tables;
+                        } else {
+                          // Fetch from /fetch-schema if not present
+                          const token = window.localStorage.getItem('klaris_jwt');
+                          const resp = await fetch(
+                            `${API_URL}/tenants/${tenantId}/connectors/${data.connector_id}/fetch-schema`,
+                            { method: 'POST', headers: { Authorization: `Bearer ${token}` } }
+                          );
+                          const result = await resp.json();
+                          if (result?.schema?.tables) tables = result.schema.tables;
+                          else if (result?.files) tables = result.files; // fallback to files
+                        }
+                        setDriveFiles((tables || []).map((t: any) => ({ id: t.table, name: t.table, mimeType: t.schema })));
+                        setSelectedIds(data?.connector_metadata?.selected_table_names || []);
+                      } catch (err: any) {
+                        setFilesError('Failed to fetch tables');
+                      } finally {
+                        setFilesLoading(false);
+                      }
+                    }}
+                  >
+                    {data?.connector_metadata?.selected_table_names?.length
+                      ? `Edit Postgres Selection (${data.connector_metadata.selected_table_names.length} selected)`
+                      : 'Select Postgres Tables'}
+                  </Button>
+                  {data?.connector_metadata?.selected_table_names?.length > 0 && (
+                    <Chip
+                      label={`${data.connector_metadata.selected_table_names.length} tables selected`}
                       color="info"
                       sx={{ ml: 1 }}
                     />
@@ -300,8 +350,10 @@ const [schemaModalOpen, setSchemaModalOpen] = useState(false);
         </DialogActions>
       </Dialog>
       {/* Google Drive File/Folder Picker Modal */}
-      <Dialog open={selectModalOpen} onClose={() => setSelectModalOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Select Google Drive Files/Folders</DialogTitle>
+      <Dialog open={!!selectModalOpen} onClose={() => setSelectModalOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>
+          {selectModalOpen === 'drive' ? 'Select Google Drive Files/Folders' : 'Select Postgres Tables'}
+        </DialogTitle>
         <DialogContent>
           {filesLoading ? (
             <Box display="flex" justifyContent="center">
@@ -311,13 +363,10 @@ const [schemaModalOpen, setSchemaModalOpen] = useState(false);
             <Alert severity="error">{filesError}</Alert>
           ) : (
             <List>
-              {/* Selected files on top */}
               {[
-                // Selected (in the order of selectedIds)
                 ...selectedIds
                   .map(selId => driveFiles.find(f => f.id === selId))
                   .filter(Boolean),
-                // Unselected
                 ...driveFiles.filter(f => !selectedIds.includes(f.id)),
               ].map((f: any) => f && (
                 <ListItem
@@ -338,7 +387,10 @@ const [schemaModalOpen, setSchemaModalOpen] = useState(false);
                       disableRipple
                     />
                   </ListItemIcon>
-                  <ListItemText primary={f.name} secondary={f.mimeType} />
+                  <ListItemText
+                    primary={f.name}
+                    secondary={selectModalOpen === 'drive' ? f.mimeType : undefined}
+                  />
                 </ListItem>
               ))}
             </List>
@@ -351,6 +403,9 @@ const [schemaModalOpen, setSchemaModalOpen] = useState(false);
               setSavingSelection(true);
               try {
                 const token = window.localStorage.getItem('klaris_jwt');
+                const patchBody = selectModalOpen === 'drive'
+                  ? { connector_metadata: { selected_drive_file_ids: selectedIds } }
+                  : { connector_metadata: { selected_table_names: selectedIds } };
                 const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`,
                   {
                     method: 'PATCH',
@@ -358,13 +413,10 @@ const [schemaModalOpen, setSchemaModalOpen] = useState(false);
                       'Authorization': `Bearer ${token}`,
                       'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({
-                      connector_metadata: { selected_drive_file_ids: selectedIds },
-                    }),
+                    body: JSON.stringify(patchBody),
                   }
                 );
                 if (!resp.ok) throw new Error('Failed to save selection');
-                // Refetch connector details to get the updated connector_metadata
                 await fetchDetail();
                 setSelectModalOpen(false);
               } catch (err: any) {

@@ -33,11 +33,11 @@ export default function ConnectorsPage() {
   const [addErr, setAddErr] = useState<string | null>(null);
   const [form, setForm] = useState({
     type: 'postgres',
-    mcp_url: '',
-    username: '',
+    host: '',
+    port: '',
+    user: '',
     password: '',
-    client_id: '',
-    client_secret: ''
+    database: ''
   });
 
   useEffect(() => {
@@ -76,8 +76,8 @@ export default function ConnectorsPage() {
 
   const handleAddConnector = async () => {
     setAddErr(null);
-    if (!form.mcp_url || !form.type) {
-      setAddErr('Connector type and MCP URL are required.');
+    if (!form.type || !form.host || !form.user || !form.password || !form.database) {
+      setAddErr('All fields are required.');
       return;
     }
     setAddLoading(true);
@@ -89,18 +89,18 @@ export default function ConnectorsPage() {
         body: JSON.stringify({
           type: form.type,
           config: {
-            mcp_url: form.mcp_url,
-            username: form.username,
+            host: form.host,
+            port: form.port,
+            user: form.user,
             password: form.password,
-            client_id: form.client_id,
-            client_secret: form.client_secret,
+            database: form.database
           }
         })
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data?.error || 'Failed to add connector');
       setAddOpen(false);
-      setForm({ type: 'postgres', mcp_url: '', username: '', password: '', client_id: '', client_secret: '' });
+      setForm({ type: 'postgres', host: '', port: '', user: '', password: '', database: '' });
       fetchConnectors();
     } catch (err: any) {
       setAddErr(err.message || 'Failed to add connector');
@@ -186,44 +186,48 @@ export default function ConnectorsPage() {
                 ))}
             </TextField>
             <TextField
-              label="MCP Endpoint URL"
-              value={form.mcp_url}
-              onChange={e => setForm(f => ({ ...f, mcp_url: e.target.value }))}
+              label="Host"
+              value={form.host || ''}
+              onChange={e => setForm(f => ({ ...f, host: e.target.value }))}
               fullWidth
               required
             />
             <TextField
-              label="Username"
-              value={form.username}
-              onChange={e => setForm(f => ({ ...f, username: e.target.value }))}
+              label="Port"
+              type="number"
+              value={form.port || ''}
+              onChange={e => setForm(f => ({ ...f, port: e.target.value }))}
               fullWidth
+              placeholder="5432"
+            />
+            <TextField
+              label="User"
+              value={form.user || ''}
+              onChange={e => setForm(f => ({ ...f, user: e.target.value }))}
+              fullWidth
+              required
             />
             <TextField
               label="Password"
               type="password"
-              value={form.password}
+              value={form.password || ''}
               onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
               fullWidth
+              required
             />
             <TextField
-              label="Client ID (optional)"
-              value={form.client_id}
-              onChange={e => setForm(f => ({ ...f, client_id: e.target.value }))}
+              label="Database"
+              value={form.database || ''}
+              onChange={e => setForm(f => ({ ...f, database: e.target.value }))}
               fullWidth
-            />
-            <TextField
-              label="Client Secret (optional)"
-              type="password"
-              value={form.client_secret}
-              onChange={e => setForm(f => ({ ...f, client_secret: e.target.value }))}
-              fullWidth
+              required
             />
           </Box>
           {addErr && <Alert severity="error" sx={{ mt: 2 }}>{addErr}</Alert>}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setAddOpen(false)} disabled={addLoading}>Cancel</Button>
-          <Button onClick={handleAddConnector} disabled={addLoading || !form.type || !form.mcp_url}>
+          <Button onClick={handleAddConnector} disabled={addLoading || !form.type || !form.host || !form.user || !form.password || !form.database}>
             {addLoading ? <CircularProgress size={22} /> : 'Add'}
           </Button>
         </DialogActions>

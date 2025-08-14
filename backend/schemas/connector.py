@@ -2,7 +2,7 @@
 Connector API Pydantic Schemas
 Production-grade: type-safe, linted, API versioned.
 """
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 from uuid import UUID
 from pydantic import BaseModel, Field, Json
 from enum import Enum
@@ -16,23 +16,11 @@ class ConnectorStatus(str, Enum):
     ACTIVE = "active"
     FAILED = "failed"
 
-class ConnectorConfig(BaseModel):
-    # Minimum MCP config
-    mcp_url: Optional[str] = Field(None, example="http://my-mcp-server:8000")
-    # For OAuth-based connectors, these may remain None; tokens handled by backend.
-    username: Optional[str] = Field(None)
-    password: Optional[str] = Field(None)
-    client_id: Optional[str] = Field(None)
-    client_secret: Optional[str] = Field(None)
-    # For Google Drive, tokens managed internally
-    oauth_access_token: Optional[str] = Field(None, exclude=True)
-    oauth_refresh_token: Optional[str] = Field(None, exclude=True)
-    token_expiry: Optional[str] = Field(None, exclude=True)
-    extra: Optional[Any] = Field(None)
+# Removed ConnectorConfig, use Dict[str, Any] for config
 
 class ConnectorCreateRequest(BaseModel):
     type: ConnectorType
-    config: ConnectorConfig
+    config: Dict[str, Any]
 
 class ConnectorCreateResponse(BaseModel):
     connector_id: UUID

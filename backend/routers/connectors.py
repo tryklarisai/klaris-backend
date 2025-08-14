@@ -22,6 +22,23 @@ from urllib.parse import urlencode
 from fastapi.responses import RedirectResponse
 
 import requests
+from uuid import UUID
+
+def make_json_safe(obj):
+    """
+    Recursively convert any UUID or datetime in dict/list to string, so that the structure becomes fully JSON serializable.
+    """
+    from datetime import datetime
+    if isinstance(obj, dict):
+        return {k: make_json_safe(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [make_json_safe(x) for x in obj]
+    elif isinstance(obj, UUID):
+        return str(obj)
+    elif isinstance(obj, datetime):
+        return obj.isoformat()
+    else:
+        return obj
 
 def test_mcp_connection_and_fetch_schema(conn_type: str, config: dict) -> tuple[bool, Optional[dict], Optional[str]]:
     """
@@ -206,9 +223,9 @@ def fetch_connector_schema(
     # Save to DB
     now = datetime.utcnow()
     schema = Schema(
-        connector_id=conn.connector_id,
-        tenant_id=tenant_id,
-        raw_schema={"schema": mcp_schema, "fetched_at": now.isoformat()},
+        connector_id=str(conn.connector_id),
+        tenant_id=str(tenant_id),
+        raw_schema=make_json_safe({"schema": mcp_schema, "fetched_at": now.isoformat()}),
         fetched_at=now
     )
     db.add(schema)
@@ -229,9 +246,9 @@ def create_connector(
 
     now = datetime.utcnow()
     connector = Connector(
-        tenant_id=tenant_id,
+        tenant_id=str(tenant_id),
         type=request.type.value,
-        config=request.config.dict(),
+        config=request.config,
         status=ConnectorStatus.FAILED,  # pessimistic by default
         created_at=now,
         updated_at=now,
@@ -239,24 +256,7 @@ def create_connector(
     db.add(connector)
     db.flush()  # get generated connector_id (UUID)
 
-    # Test connection and try to fetch schema based on connector type
-    ok, schema_json, error = test_mcp_connection_and_fetch_schema(request.type.value, request.config.dict())
-    if ok and schema_json:
-        connector.status = ConnectorStatus.ACTIVE
-        connector.last_schema_fetch = now
-        connector.error_message = None
-        # Save current schema
-        schema = Schema(
-            connector_id=connector.connector_id,
-            tenant_id=tenant_id,
-            raw_schema=schema_json,
-            fetched_at=now,
-        )
-        db.add(schema)
-    else:
-        connector.status = ConnectorStatus.FAILED
-        connector.error_message = error or "Unknown failure during connection/schema fetch"
-        connector.last_schema_fetch = None
+    # Skip MCP connection and schema fetch
     db.commit()
     return ConnectorCreateResponse(
         connector_id=connector.connector_id,
@@ -314,9 +314,9 @@ def retest_connector(
         connector.last_schema_fetch = now
         connector.error_message = None
         schema = Schema(
-            connector_id=connector.connector_id,
-            tenant_id=tenant_id,
-            raw_schema=schema_json,
+            connector_id=str(connector.connector_id),
+            tenant_id=str(tenant_id),
+            raw_schema=make_json_safe(schema_json),
             fetched_at=now,
         )
         db.add(schema)

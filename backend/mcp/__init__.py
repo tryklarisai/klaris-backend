@@ -14,4 +14,6 @@ def get_adapter(connector_type: str):
 
 # Register known adapters here
 from .google_drive import GoogleDriveMCPAdapter
+from .postgres import PostgresMCPAdapter
 register_adapter("google_drive", GoogleDriveMCPAdapter)
+register_adapter("postgres", PostgresMCPAdapter)
