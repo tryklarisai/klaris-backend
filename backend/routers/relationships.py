@@ -273,6 +273,7 @@ class SaveGlobalCanonicalBody(BaseModel):
     review_id: Optional[UUID4] = None
     user_edits: dict
     note: Optional[str] = None
+    expected_version: Optional[int] = None
 
 
 @router.post("/canonical")
@@ -283,8 +284,23 @@ def save_global_canonical(
     credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
 ):
     ctx = check_auth_and_tenant(credentials, tenant_id)
-    # Determine next version
+    # Determine next version and enforce optimistic concurrency
     latest = db.query(GlobalCanonicalSchema).filter_by(tenant_id=tenant_id).order_by(GlobalCanonicalSchema.version.desc()).first()
+    if body.expected_version is not None:
+        latest_version = latest.version if latest else 0
+        if int(body.expected_version) != int(latest_version):
+            # 409 Conflict with latest details for the client to refresh
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Version conflict: latest canonical has changed.",
+                    "latest_version": latest_version,
+                    "latest": {
+                        "version": latest_version,
+                        "canonical_graph": (latest.canonical_graph if latest else None),
+                    },
+                },
+            )
     next_version = 1 if not latest else latest.version + 1
     from datetime import datetime as dt
     canon = GlobalCanonicalSchema(
@@ -304,6 +320,7 @@ def save_global_canonical(
         "version": canon.version,
         "canonical_graph": canon.canonical_graph,
         "created_at": canon.created_at.isoformat(),
+        "base_schema_ids": canon.base_schema_ids,
     }
 
 
@@ -322,6 +339,105 @@ def get_latest_global_canonical(
         "version": latest.version,
         "canonical_graph": latest.canonical_graph,
         "created_at": latest.created_at.isoformat(),
+        "base_schema_ids": latest.base_schema_ids,
     }
+
+
+class ValidationErrorItem(BaseModel):
+    path: str
+    message: str
+
+
+class ValidateCanonicalBody(BaseModel):
+    canonical_graph: dict
+
+
+@router.post("/canonical/validate")
+def validate_canonical(
+    tenant_id: str,
+    body: ValidateCanonicalBody,
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    check_auth_and_tenant(credentials, tenant_id)
+    graph = body.canonical_graph or {}
+    errors: list[dict] = []
+
+    def add_err(path: str, msg: str):
+        errors.append({"path": path, "message": msg})
+
+    # Limits from env
+    import os
+    max_entities = int(os.getenv("REL_MAX_ENTITIES", "2000"))
+    max_fields = int(os.getenv("REL_MAX_FIELDS_PER_ENTITY", "500"))
+    max_rels = int(os.getenv("REL_MAX_RELATIONSHIPS", "5000"))
+
+    ents = graph.get("unified_entities") or []
+    rels = graph.get("cross_source_relationships") or []
+
+    if not isinstance(ents, list):
+        add_err("/unified_entities", "must be a list")
+    else:
+        if len(ents) > max_entities:
+            add_err("/unified_entities", f"too many entities (>{max_entities})")
+        seen_names = set()
+        for i, e in enumerate(ents):
+            name = (e.get("name") or "").strip()
+            if not name:
+                add_err(f"/unified_entities[{i}]/name", "required")
+            key = name.lower()
+            if key in seen_names:
+                add_err(f"/unified_entities[{i}]/name", "duplicate entity name")
+            seen_names.add(key)
+            # Fields
+            fields = e.get("fields") or []
+            if not isinstance(fields, list):
+                add_err(f"/unified_entities[{i}]/fields", "must be a list")
+            else:
+                if len(fields) > max_fields:
+                    add_err(f"/unified_entities[{i}]/fields", f"too many fields (>{max_fields})")
+                seen_f = set()
+                for j, f in enumerate(fields):
+                    fname = (f.get("name") or "").strip()
+                    if not fname:
+                        add_err(f"/unified_entities[{i}]/fields[{j}]/name", "required")
+                    fk = fname.lower()
+                    if fk in seen_f:
+                        add_err(f"/unified_entities[{i}]/fields[{j}]/name", "duplicate field name")
+                    seen_f.add(fk)
+                    pii = (f.get("pii_sensitivity") or "none").lower()
+                    if pii not in ("none", "low", "medium", "high"):
+                        add_err(f"/unified_entities[{i}]/fields[{j}]/pii_sensitivity", "invalid enum")
+
+    if not isinstance(rels, list):
+        add_err("/cross_source_relationships", "must be a list")
+    else:
+        if len(rels) > max_rels:
+            add_err("/cross_source_relationships", f"too many relationships (>{max_rels})")
+        # Reference validation
+        ent_index = { (e.get("name") or "").lower(): e for e in ents if isinstance(e, dict) }
+        for k, r in enumerate(rels):
+            t = (r.get("type") or "unknown").lower()
+            if t not in ("one_to_one", "one_to_many", "many_to_one", "many_to_many", "unknown"):
+                add_err(f"/cross_source_relationships[{k}]/type", "invalid enum")
+            fe = (r.get("from_entity") or "").lower()
+            te = (r.get("to_entity") or "").lower()
+            if fe not in ent_index:
+                add_err(f"/cross_source_relationships[{k}]/from_entity", "unknown entity")
+            if te not in ent_index:
+                add_err(f"/cross_source_relationships[{k}]/to_entity", "unknown entity")
+            ff = r.get("from_field")
+            tf = r.get("to_field")
+            if ff:
+                fields = ent_index.get(fe, {}).get("fields", [])
+                if (ff.lower() if isinstance(ff, str) else "") not in { (f.get("name") or "").lower() for f in fields }:
+                    add_err(f"/cross_source_relationships[{k}]/from_field", "unknown field for from_entity")
+            if tf:
+                fields = ent_index.get(te, {}).get("fields", [])
+                if (tf.lower() if isinstance(tf, str) else "") not in { (f.get("name") or "").lower() for f in fields }:
+                    add_err(f"/cross_source_relationships[{k}]/to_field", "unknown field for to_entity")
+
+    if errors:
+        return {"ok": False, "errors": errors}
+    return {"ok": True}
 
 
