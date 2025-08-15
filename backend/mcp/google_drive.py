@@ -69,67 +69,163 @@ class GoogleDriveMCPAdapter:
         drive_service = google_build("drive", "v3", credentials=creds)
         sheets_service = google_build("sheets", "v4", credentials=creds)
 
-        # List all files (limit 1000 for reasonable default)
-        files_response = drive_service.files().list(
-            q="trashed = false",
-            fields="files(id, name, mimeType, parents, size)",
-            pageSize=1000
-        ).execute()
-        files = files_response.get("files", [])
+        # Build working set of files. If selection provided, fetch metadata per id (avoids listing entire Drive)
+        selection_ids = set()
+        if metadata and isinstance(metadata.get("selected_drive_file_ids"), list):
+            selection_ids = set(metadata.get("selected_drive_file_ids") or [])
+        files = []
+        if selection_ids:
+            for fid in selection_ids:
+                try:
+                    meta = drive_service.files().get(fileId=fid, fields="id,name,mimeType,parents,size").execute()
+                    files.append(meta)
+                except Exception:
+                    # Skip files we cannot access
+                    continue
+        else:
+            # Fallback: list (limited) – should rarely be used since we enforce selection upstream
+            files_response = drive_service.files().list(
+                q="trashed = false",
+                fields="files(id, name, mimeType, parents, size)",
+                pageSize=200
+            ).execute()
+            files = files_response.get("files", [])
 
         # If metadata contains selected_drive_file_ids, filter files
         if metadata and isinstance(metadata.get("selected_drive_file_ids"), list) and metadata["selected_drive_file_ids"]:
             selected_ids = set(metadata["selected_drive_file_ids"])
             files = [f for f in files if f["id"] in selected_ids]
 
-        result = []
+        entities = []
         for f in files:
-            entry = {
-                "id": f["id"],
-                "name": f["name"],
-                "mimeType": f["mimeType"],
-                "parents": f.get("parents", []),
-                "sample_rows": None
-            }
+            file_id = f["id"]
+            file_name = f["name"]
+            mime = f["mimeType"]
             # Google Sheets
-            if f["mimeType"] == "application/vnd.google-apps.spreadsheet":
+            if mime == "application/vnd.google-apps.spreadsheet":
                 try:
-                    meta = sheets_service.spreadsheets().get(spreadsheetId=f["id"]).execute()
-                    first_sheet = meta["sheets"][0]["properties"]["title"]
-                    values = sheets_service.spreadsheets().values().get(
-                        spreadsheetId=f["id"],
-                        range=first_sheet
-                    ).execute().get("values", [])
-                    if values:
-                        n = len(values)
-                        sample_size = min(n-1, 10) if n > 1 else min(n, 10)
-                        sample_rows = random.sample(values[1:], sample_size) if n > 1 else values[:sample_size]
-                        entry["sample_rows"] = {
-                            "header": values[0] if n > 1 else None,
-                            "rows": sample_rows
+                    # Configurable limits
+                    import math
+                    sample_rows_limit = int(os.getenv("GDRIVE_SHEET_SAMPLE_ROWS", "10"))
+                    max_sheets = int(os.getenv("GDRIVE_MAX_SHEETS", "10"))
+
+                    meta = sheets_service.spreadsheets().get(spreadsheetId=file_id).execute()
+                    sheets_meta = meta.get("sheets", [])[:max_sheets]
+
+                    # Column limit window for faster reads (A.. letter for max cols)
+                    max_cols = int(os.getenv("GDRIVE_SHEET_MAX_COLS", "500"))
+                    max_rows_window = int(os.getenv("GDRIVE_SHEET_SAMPLE_WINDOW_ROWS", "200"))
+
+                    def col_letter(n: int) -> str:
+                        # 1 -> A, 26 -> Z, 27 -> AA
+                        s = ""
+                        while n > 0:
+                            n, r = divmod(n - 1, 26)
+                            s = chr(65 + r) + s
+                        return s
+
+                    last_col = col_letter(max_cols)
+
+                    for idx, sh in enumerate(sheets_meta):
+                        title = sh.get("properties", {}).get("title")
+                        if not title:
+                            continue
+                        # Pull only a window of cells for performance (header + up to window rows)
+                        vals = sheets_service.spreadsheets().values().get(
+                            spreadsheetId=file_id,
+                            range=f"{title}!A1:{last_col}{max_rows_window}"
+                        ).execute().get("values", [])
+                        header = None
+                        rows = []
+                        fields = []
+                        if vals:
+                            total_rows = len(vals)
+                            has_header = total_rows > 1
+                            header = vals[0] if has_header else None
+                            body_rows = vals[1:] if has_header else vals
+                            if body_rows:
+                                sample_size = min(sample_rows_limit, len(body_rows))
+                                rows = random.sample(body_rows, sample_size) if len(body_rows) > sample_size else body_rows
+                            if header:
+                                fields = [{"name": str(h), "type": "string"} for h in header]
+                        entity = {
+                            "id": f"{file_id}:{title}",
+                            "name": f"{file_name} / {title}",
+                            "kind": "sheet",
+                            "source": {"provider": "google_drive", "path": file_name},
+                            "fields": fields,
+                            "samples": [{"header": header, "rows": rows, "part": title}]
                         }
+                        entities.append(entity)
                 except Exception as e:
-                    entry["sample_rows"] = {"error": str(e)}
+                    entities.append({
+                        "id": file_id,
+                        "name": file_name,
+                        "kind": "sheet",
+                        "source": {"provider": "google_drive", "path": file_name},
+                        "fields": [],
+                        "samples": [{"note": str(e), "rows": []}],
+                    })
             # Excel/xlsx
-            elif f["mimeType"] in [
+            elif mime in [
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 "application/vnd.ms-excel"
             ]:
                 try:
                     file_io = io.BytesIO()
-                    data = drive_service.files().get_media(fileId=f["id"]).execute()
+                    data = drive_service.files().get_media(fileId=file_id).execute()
                     file_io.write(data)
                     file_io.seek(0)
-                    df = pd.read_excel(file_io)
-                    if not df.empty:
-                        # Convert all columns to str to guarantee JSON serializable
-                        df = df.astype(str)
-                        sample_rows = df.sample(n=min(10, len(df))).to_dict(orient="records")
-                        entry["sample_rows"] = {
-                            "header": list(df.columns),
-                            "rows": sample_rows
-                        }
+                    # Prefer engine based on mimeType for reliability
+                    engine = None
+                    if mime == "application/vnd.ms-excel":
+                        engine = "xlrd"
+                    # Read all sheets
+                    try:
+                        # Read only first N rows per sheet for performance
+                        nrows = int(os.getenv("GDRIVE_SHEET_SAMPLE_WINDOW_ROWS", "200"))
+                        sheets = pd.read_excel(file_io, sheet_name=None, engine=engine, nrows=nrows)
+                    except Exception:
+                        sheets = pd.read_excel(file_io, sheet_name=None, nrows=200)
+                    sample_rows_limit = int(os.getenv("GDRIVE_SHEET_SAMPLE_ROWS", "10"))
+                    for title, df in sheets.items():
+                        if isinstance(df, pd.DataFrame) and not df.empty:
+                            df = df.astype(str)
+                            rows_df = df.sample(n=min(sample_rows_limit, len(df))).to_dict(orient="records")
+                            entities.append({
+                                "id": f"{file_id}:{title}",
+                                "name": f"{file_name} / {title}",
+                                "kind": "sheet",
+                                "source": {"provider": "google_drive", "path": file_name},
+                                "fields": [{"name": str(c), "type": "string"} for c in list(df.columns)],
+                                "samples": [{"header": list(df.columns), "rows": rows_df, "part": title}],
+                            })
+                        else:
+                            entities.append({
+                                "id": f"{file_id}:{title}",
+                                "name": f"{file_name} / {title}",
+                                "kind": "sheet",
+                                "source": {"provider": "google_drive", "path": file_name},
+                                "fields": [],
+                                "samples": [{"rows": []}],
+                            })
                 except Exception as e:
-                    entry["sample_rows"] = {"error": str(e)}
-            result.append(entry)
-        return {"files": result}
+                    entities.append({
+                        "id": file_id,
+                        "name": file_name,
+                        "kind": "sheet",
+                        "source": {"provider": "google_drive", "path": file_name},
+                        "fields": [],
+                        "samples": [{"note": str(e), "rows": []}],
+                    })
+            else:
+                # Non-tabular files included as kind=file without samples
+                entities.append({
+                    "id": file_id,
+                    "name": file_name,
+                    "kind": "file",
+                    "source": {"provider": "google_drive", "path": file_name},
+                    "fields": [],
+                    "samples": [],
+                })
+        return {"entities": entities}

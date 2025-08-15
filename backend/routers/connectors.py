@@ -174,6 +174,7 @@ import io
 import requests as pyrequests
 
 from mcp.google_drive import GoogleDriveMCPAdapter
+from mcp.postgres import PostgresMCPAdapter
 
 @router.get("/{connector_id}/google-drive-files", summary="List Google Drive files for a connector", response_model=list)
 def list_google_drive_files(
@@ -194,6 +195,53 @@ def list_google_drive_files(
         return files
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Google Drive API error: {str(e)}")
+
+
+@router.get("/{connector_id}/postgres-tables", summary="List Postgres tables for a connector", response_model=list)
+def list_postgres_tables(
+    tenant_id: str,
+    connector_id: str,
+    db: Session = Depends(get_db)
+):
+    from models.connector import Connector
+    conn = db.query(Connector).filter_by(connector_id=connector_id, tenant_id=tenant_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    if conn.type not in ("postgres", "POSTGRES"):
+        raise HTTPException(status_code=400, detail="Connector is not Postgres type")
+    try:
+        tables = PostgresMCPAdapter.list_tables(conn.config)
+        return tables
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Postgres list tables error: {str(e)}")
+
+
+@router.get("/{connector_id}/select-files", summary="Unified selectable items for a connector", response_model=list)
+def list_selectable_items(
+    tenant_id: str,
+    connector_id: str,
+    db: Session = Depends(get_db)
+):
+    from models.connector import Connector
+    conn = db.query(Connector).filter_by(connector_id=connector_id, tenant_id=tenant_id).first()
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    ctype = (conn.type or "").lower()
+    try:
+        if ctype in ("google_drive", "gdrive"):
+            return GoogleDriveMCPAdapter.list_files(conn.config)
+        if ctype == "postgres":
+            tables = PostgresMCPAdapter.list_tables(conn.config)
+            # Normalize to the same shape the UI expects: {id, name, mimeType}
+            return [
+                {"id": t["name"], "name": t["name"], "mimeType": t["schema"]}
+                for t in tables
+            ]
+        raise HTTPException(status_code=400, detail=f"Unsupported connector type: {conn.type}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Selection listing failed: {str(e)}")
 
 @router.post("/{connector_id}/fetch-schema")
 def fetch_connector_schema(
@@ -218,9 +266,22 @@ def fetch_connector_schema(
     try:
         mcp_adapter = get_adapter(conn.type)
         # For refresh endpoint: by default apply saved selection filters so the
-        # canonical schema reflects the user's selected entities. If `full=true`,
-        # ignore filters and return the complete schema (used by UI for editing).
-        metadata = None if full else conn.connector_metadata
+        # schema reflects the user's selected entities. If `full=true`, ignore filters and
+        # return the complete schema (used by UI for editing).
+        if not full:
+            meta = conn.connector_metadata or {}
+            ctype = (conn.type or "").lower()
+            if ctype in ("google_drive", "gdrive"):
+                selected = meta.get("selected_drive_file_ids") or []
+                if not isinstance(selected, list) or len(selected) == 0:
+                    raise HTTPException(status_code=400, detail="No files selected. Please select Google Drive files first.")
+            elif ctype == "postgres":
+                selected = meta.get("selected_table_names") or []
+                if not isinstance(selected, list) or len(selected) == 0:
+                    raise HTTPException(status_code=400, detail="No tables selected. Please select Postgres tables first.")
+            metadata = meta
+        else:
+            metadata = None
         mcp_schema = mcp_adapter.fetch_schema(conn.config, metadata)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"MCP fetch_schema failed: {e}")
@@ -364,6 +425,8 @@ def check_auth_and_tenant(credentials: HTTPAuthorizationCredentials, tenant_id: 
     if "tenant" not in payload or "tenant_id" not in payload["tenant"] or str(payload["tenant"]["tenant_id"]) != str(tenant_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant context missing or mismatch in token")
     return {"tenant_id": payload["tenant"]["tenant_id"], "user": payload.get("user")}
+
+# Removed per-connector schema review feature
 
 @router.put(
     "/{connector_id}",
@@ -516,6 +579,8 @@ def patch_connector(
         config=connector.config,
         connector_metadata=connector.connector_metadata,
     )
+
+## Removed per-connector schema review/canonical endpoints
 
 @router.get(
     "/{connector_id}/schemas/{schema_id}",

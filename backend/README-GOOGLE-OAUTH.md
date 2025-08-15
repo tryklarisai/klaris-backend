@@ -39,6 +39,16 @@ Edit your `/backend/.env`:
 GOOGLE_CLIENT_ID=your_client_id_here
 GOOGLE_CLIENT_SECRET=your_client_secret_here
 GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/tenants/<tenant_id>/connectors/google-drive/callback
+LLM_PROVIDER=anthropic
+LLM_MODEL=claude-3-5-sonnet-20240620
+LLM_API_KEY=your_anthropic_key
+# Optional tuning
+LLM_TIMEOUT_SECONDS=30
+LLM_MAX_TOKENS=1500
+LLM_RETRY_MAX=2
+LLM_BACKOFF_BASE=0.5
+SCHEMA_REVIEW_MAX_ENTITIES=500
+SCHEMA_REVIEW_DEFAULT_CONFIDENCE=0.6
 ```
 
 *For production, use your production domain in place of localhost in the redirect URI.*

@@ -181,10 +181,10 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
     try {
       const token = window.localStorage.getItem('klaris_jwt');
       const resp = await fetch(
-        `${API_URL}/tenants/${tenantId}/connectors/${connectorId}/google-drive-files`,
+        `${API_URL}/tenants/${tenantId}/connectors/${connectorId}/select-files`,
         { headers: { Authorization: `Bearer ${token}` } },
       );
-      if (!resp.ok) throw new Error('Could not fetch Google Drive files');
+      if (!resp.ok) throw new Error('Could not fetch selectable items');
       const result = await resp.json();
       setDriveFiles(result || []);
       setSelectedIds(data?.connector_metadata?.selected_drive_file_ids || []);
@@ -193,7 +193,28 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
         setSelectedDriveRows((result || []).filter((f: any) => sel.includes(f.id)));
       } catch {}
     } catch (err: any) {
-      setFilesError(err.message || 'Failed to fetch files');
+      setFilesError(err.message || 'Failed to fetch items');
+    } finally {
+      setFilesLoading(false);
+    }
+  }
+
+  // Fetch Postgres tables for the picker (lightweight; no full schema)
+  async function fetchPostgresTables() {
+    if (!tenantId || !connectorId) return;
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      const resp = await fetch(
+        `${API_URL}/tenants/${tenantId}/connectors/${connectorId}/select-files`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      );
+      if (!resp.ok) throw new Error('Could not fetch selectable items');
+      const result = await resp.json();
+      // The unified endpoint already returns: {id, name, mimeType}
+      setDriveFiles(result || []);
+      setSelectedIds(data?.connector_metadata?.selected_table_names || []);
+    } catch (err: any) {
+      setFilesError(err.message || 'Failed to fetch items');
     } finally {
       setFilesLoading(false);
     }
@@ -408,27 +429,10 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                     <Button
                       variant="outlined"
                       onClick={async () => {
-                        // Always fetch latest full table list from backend, do not use cached schema
                         setSelectModalOpen('postgres');
-                        try {
-                          setFilesLoading(true);
-                          setFilesError(null);
-                          const token = window.localStorage.getItem('klaris_jwt');
-                          const resp = await fetch(
-                            `${API_URL}/tenants/${tenantId}/connectors/${data.connector_id}/fetch-schema?full=true`,
-                            { method: 'POST', headers: { Authorization: `Bearer ${token}` } }
-                          );
-                          const result = await resp.json();
-                          let tables: any[] = [];
-                          if (result?.schema?.tables) tables = result.schema.tables;
-                          else if (result?.files) tables = result.files; // fallback to files
-                          setDriveFiles((tables || []).map((t: any) => ({ id: t.table, name: t.table, mimeType: t.schema })));
-                          setSelectedIds(data?.connector_metadata?.selected_table_names || []);
-                        } catch (err: any) {
-                          setFilesError('Failed to fetch tables');
-                        } finally {
-                          setFilesLoading(false);
-                        }
+                        setFilesLoading(true);
+                        setFilesError(null);
+                        fetchPostgresTables();
                       }}
                     >
                       {data?.connector_metadata?.selected_table_names?.length ? 'Edit Selection' : 'Select Postgres Tables'}

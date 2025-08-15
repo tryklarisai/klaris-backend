@@ -8,6 +8,7 @@ import DashboardLayout from "./pages/DashboardLayout";
 import DashboardPage from "./pages/DashboardPage";
 import ConnectorsPage from "./pages/ConnectorsPage";
 import ConnectorDetailPage from "./pages/ConnectorDetailPage";
+import DataRelationshipsPage from "./pages/DataRelationshipsPage";
 
 function App() {
   return (
@@ -22,6 +23,7 @@ function App() {
               <Route path="dashboard" element={<DashboardPage />} />
               <Route path="connectors" element={<ConnectorsPage />} />
               <Route path="connectors/:connectorId" element={<ConnectorDetailPage />} />
+              <Route path="relationships" element={<DataRelationshipsPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
