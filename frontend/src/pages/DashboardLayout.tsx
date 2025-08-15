@@ -22,6 +22,7 @@ import MenuIcon from '@mui/icons-material/Menu';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import ExtensionIcon from '@mui/icons-material/Extension';
 import SchemaIcon from '@mui/icons-material/Hub';
+import WorkIcon from '@mui/icons-material/WorkOutline';
 import LogoutIcon from '@mui/icons-material/Logout';
 import Brightness4Icon from '@mui/icons-material/Brightness4';
 import Brightness7Icon from '@mui/icons-material/Brightness7';
@@ -33,7 +34,8 @@ const drawerWidth = 260;
 const mainMenu = [
   { key: "dashboard", label: "Dashboard", path: "/", icon: <DashboardIcon fontSize="small" /> },
   { key: "connectors", label: "Connectors", path: "/connectors", icon: <ExtensionIcon fontSize="small" /> },
-  { key: "relationships", label: "Data Relationships", path: "/relationships", icon: <SchemaIcon fontSize="small" /> }
+  { key: "relationships", label: "Data Relationships", path: "/relationships", icon: <SchemaIcon fontSize="small" /> },
+  { key: "business-context", label: "Business Context", path: "/business-context", icon: <WorkIcon fontSize="small" /> }
 ];
 
 export default function DashboardLayout() {

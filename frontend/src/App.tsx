@@ -9,6 +9,7 @@ import DashboardPage from "./pages/DashboardPage";
 import ConnectorsPage from "./pages/ConnectorsPage";
 import ConnectorDetailPage from "./pages/ConnectorDetailPage";
 import DataRelationshipsPage from "./pages/DataRelationshipsPage";
+import BusinessContextPage from "./pages/BusinessContextPage";
 
 function App() {
   return (
@@ -24,6 +25,7 @@ function App() {
               <Route path="connectors" element={<ConnectorsPage />} />
               <Route path="connectors/:connectorId" element={<ConnectorDetailPage />} />
               <Route path="relationships" element={<DataRelationshipsPage />} />
+              <Route path="business-context" element={<BusinessContextPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
