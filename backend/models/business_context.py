@@ -21,7 +21,7 @@ class ContextSource(Base):
     uri: Mapped[str] = mapped_column(Text, nullable=False)  # filepath or url
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")  # pending|ingested|failed
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    metadata: Mapped[Any] = mapped_column(JSONB, nullable=True)
+    source_meta: Mapped[Any] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -33,7 +33,7 @@ class ContextChunk(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
     embedding: Mapped[Any] = mapped_column(JSONB, nullable=True)  # list[float]
-    metadata: Mapped[Any] = mapped_column(JSONB, nullable=True)
+    chunk_meta: Mapped[Any] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 

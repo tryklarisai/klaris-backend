@@ -24,7 +24,7 @@ def upgrade() -> None:
         sa.Column('uri', sa.Text(), nullable=False),
         sa.Column('status', sa.String(length=16), nullable=False),
         sa.Column('error_message', sa.Text(), nullable=True),
-        sa.Column('metadata', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column('source_meta', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column('created_at', sa.DateTime(), nullable=False),
         sa.PrimaryKeyConstraint('source_id')
     )
@@ -35,7 +35,7 @@ def upgrade() -> None:
         sa.Column('tenant_id', postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column('text', sa.Text(), nullable=False),
         sa.Column('embedding', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.Column('metadata', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column('chunk_meta', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column('created_at', sa.DateTime(), nullable=False),
         sa.PrimaryKeyConstraint('chunk_id')
     )
