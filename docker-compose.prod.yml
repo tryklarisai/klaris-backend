@@ -49,6 +49,10 @@ services:
 
   frontend:
     build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        - REACT_APP_API_URL=https://demo.tryklaris.ai/api
     labels:
       - traefik.enable=true
       - traefik.http.routers.front.rule=Host(`demo.tryklaris.ai`)
