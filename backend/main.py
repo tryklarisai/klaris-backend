@@ -1,4 +1,5 @@
 import logging
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers.tenants import router as tenant_router
@@ -9,8 +10,13 @@ from routers.business_context import router as business_context_router
 from routers.schemas import router as schema_router
 from routers.chat import router as chat_router
 
-# Configure root logging (simple stdout handler)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# Configure root logging (stdout handler) with level from env
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+try:
+    level = getattr(logging, log_level)
+except Exception:
+    level = logging.INFO
+logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 app = FastAPI()
 
