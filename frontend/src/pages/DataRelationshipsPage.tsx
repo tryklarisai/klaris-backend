@@ -11,6 +11,7 @@ import { buildApiUrl } from '../config';
 const API_URL = buildApiUrl('');
 
 export default function DataRelationshipsPage() {
+  // Pilot-only: saved canonical is expected to have entities/relationships
   const [tenantId, setTenantId] = React.useState<string | null>(null);
   const [connectors, setConnectors] = React.useState<any[]>([]);
   const [selectedConnectorIds, setSelectedConnectorIds] = React.useState<string[]>([]);
@@ -82,7 +83,6 @@ export default function DataRelationshipsPage() {
 
   function extractEntities(obj: any): any[] {
     if (!obj) return [];
-    // Stored DB shape may be either { schema: {...} } or direct
     const root = obj.schema ?? obj;
     const entities = root?.entities;
     return Array.isArray(entities) ? entities : [];
@@ -198,8 +198,7 @@ export default function DataRelationshipsPage() {
             <TableCell>Name</TableCell>
             <TableCell>Tags</TableCell>
             <TableCell>Fields</TableCell>
-            <TableCell>Sources</TableCell>
-            <TableCell>Conf.</TableCell>
+            <TableCell>Mappings</TableCell>
           </TableRow>
         </TableHead>
         <TableBody>
@@ -208,8 +207,7 @@ export default function DataRelationshipsPage() {
               <TableCell>{e.name}</TableCell>
               <TableCell>{(e.tags || []).join(', ')}</TableCell>
               <TableCell>{(e.fields || []).map((f: any) => f.name).slice(0, 6).join(', ')}{(e.fields || []).length > 6 ? '…' : ''}</TableCell>
-              <TableCell>{(e.source_mappings || []).length}</TableCell>
-              <TableCell>{typeof e.confidence === 'number' ? e.confidence.toFixed(2) : ''}</TableCell>
+              <TableCell>{(e.fields || []).reduce((acc: number, f: any) => acc + ((f.mappings || []).length || 0), 0)}</TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -225,17 +223,17 @@ export default function DataRelationshipsPage() {
             <TableCell>From</TableCell>
             <TableCell>To</TableCell>
             <TableCell>Type</TableCell>
-            <TableCell>Description</TableCell>
-            <TableCell>Conf.</TableCell>
+            <TableCell>Join On</TableCell>
+            <TableCell>Confidence</TableCell>
           </TableRow>
         </TableHead>
         <TableBody>
           {(rels || []).map((r, idx) => (
             <TableRow key={idx}>
-              <TableCell>{r.from_entity}{r.from_field ? `.${r.from_field}` : ''}</TableCell>
-              <TableCell>{r.to_entity}{r.to_field ? `.${r.to_field}` : ''}</TableCell>
+              <TableCell>{r.from_entity}</TableCell>
+              <TableCell>{r.to_entity}</TableCell>
               <TableCell>{r.type}</TableCell>
-              <TableCell>{r.description}</TableCell>
+              <TableCell>{Array.isArray(r.join_on) ? r.join_on.map((p: any) => `${p.from_field} = ${r.to_entity}.${p.to_field}`).join(', ') : ''}</TableCell>
               <TableCell>{typeof r.confidence === 'number' ? r.confidence.toFixed(2) : ''}</TableCell>
             </TableRow>
           ))}
@@ -249,42 +247,42 @@ export default function DataRelationshipsPage() {
     const onEntityChange = (i: number, patch: any) => {
       setDraftCanonical((prev: any) => {
         const next = JSON.parse(JSON.stringify(prev || {}));
-        next.unified_entities[i] = { ...(next.unified_entities[i] || {}), ...patch };
+        next.entities[i] = { ...(next.entities[i] || {}), ...patch };
         return next;
       });
     };
     const onFieldChange = (i: number, j: number, patch: any) => {
       setDraftCanonical((prev: any) => {
         const next = JSON.parse(JSON.stringify(prev || {}));
-        next.unified_entities[i].fields[j] = { ...(next.unified_entities[i].fields[j] || {}), ...patch };
+        next.entities[i].fields[j] = { ...(next.entities[i].fields[j] || {}), ...patch };
         return next;
       });
     };
     const addEntity = () => {
       setDraftCanonical((prev: any) => {
-        const next = JSON.parse(JSON.stringify(prev || { unified_entities: [] }));
-        (next.unified_entities = next.unified_entities || []).push({ name: 'New Entity', description: '', tags: [], confidence: 0.0, fields: [], source_mappings: [] });
+        const next = JSON.parse(JSON.stringify(prev || { entities: [] }));
+        (next.entities = next.entities || []).push({ name: 'New Entity', description: '', fields: [] });
         return next;
       });
     };
     const removeEntity = (i: number) => {
       setDraftCanonical((prev: any) => {
         const next = JSON.parse(JSON.stringify(prev || {}));
-        next.unified_entities.splice(i, 1);
+        next.entities.splice(i, 1);
         return next;
       });
     };
     const addField = (i: number) => {
       setDraftCanonical((prev: any) => {
         const next = JSON.parse(JSON.stringify(prev || {}));
-        (next.unified_entities[i].fields = next.unified_entities[i].fields || []).push({ name: 'new_field', description: '', semantic_type: '', pii_sensitivity: 'none', nullable: false, data_type: '', confidence: 0 });
+        (next.entities[i].fields = next.entities[i].fields || []).push({ name: 'new_field', description: '', semantic_type: '', pii_sensitivity: 'none', nullable: false, data_type: '' });
         return next;
       });
     };
     const removeField = (i: number, j: number) => {
       setDraftCanonical((prev: any) => {
         const next = JSON.parse(JSON.stringify(prev || {}));
-        next.unified_entities[i].fields.splice(j, 1);
+        next.entities[i].fields.splice(j, 1);
         return next;
       });
     };
@@ -292,7 +290,7 @@ export default function DataRelationshipsPage() {
       const t = (tag || '').trim(); if (!t) return;
       setDraftCanonical((prev: any) => {
         const next = JSON.parse(JSON.stringify(prev || {}));
-        const tags = (next.unified_entities[i].tags = next.unified_entities[i].tags || []);
+        const tags = (next.entities[i].tags = next.entities[i].tags || []);
         if (!tags.includes(t)) tags.push(t);
         return next;
       });
@@ -300,7 +298,7 @@ export default function DataRelationshipsPage() {
     const removeTag = (i: number, tag: string) => {
       setDraftCanonical((prev: any) => {
         const next = JSON.parse(JSON.stringify(prev || {}));
-        next.unified_entities[i].tags = (next.unified_entities[i].tags || []).filter((x: string) => x !== tag);
+        next.entities[i].tags = (next.entities[i].tags || []).filter((x: string) => x !== tag);
         return next;
       });
     };
@@ -349,6 +347,7 @@ export default function DataRelationshipsPage() {
                           <TableCell sx={{ ...headerCellSx, ...colSx.pii }}>PII</TableCell>
                           <TableCell sx={{ ...headerCellSx, ...colSx.nullable }}>Null</TableCell>
                           <TableCell sx={{ ...headerCellSx, ...colSx.dtype }}>Type</TableCell>
+                          <TableCell sx={{ ...headerCellSx, width: 110 }}>Confidence</TableCell>
                           <TableCell sx={{ ...headerCellSx, ...colSx.act }}>Act</TableCell>
                         </TableRow>
                       </TableHead>
@@ -369,11 +368,14 @@ export default function DataRelationshipsPage() {
                             </TableCell>
                             <TableCell sx={colSx.nullable}><Switch size="small" checked={!!f.nullable} onChange={(ev) => onFieldChange(i, j, { nullable: ev.target.checked })} /></TableCell>
                             <TableCell sx={colSx.dtype}><TextField size="small" placeholder="type" value={f.data_type || ''} onChange={(ev) => onFieldChange(i, j, { data_type: ev.target.value })} /></TableCell>
+                            <TableCell sx={{ width: 110 }}>
+                              <TextField size="small" type="number" inputProps={{ readOnly: true }} value={typeof f.confidence === 'number' ? f.confidence.toFixed(2) : ''} />
+                            </TableCell>
                             <TableCell sx={colSx.act}><IconButton size="small" onClick={() => removeField(i, j)} aria-label="remove field"><DeleteIcon fontSize="small" /></IconButton></TableCell>
                           </TableRow>
                         ))}
                         <TableRow>
-                          <TableCell colSpan={7}><Button size="small" startIcon={<AddIcon />} onClick={() => addField(i)}>Add Field</Button></TableCell>
+                          <TableCell colSpan={8}><Button size="small" startIcon={<AddIcon />} onClick={() => addField(i)}>Add Field</Button></TableCell>
                         </TableRow>
                       </TableBody>
                     </Table>
@@ -388,26 +390,26 @@ export default function DataRelationshipsPage() {
   }
 
   function EditableRelationshipsTable({ rels }: { rels: any[] }) {
-    const entityNames = (draftCanonical?.unified_entities || []).map((e: any) => e.name as string);
-    const fieldsByEntity: Record<string, string[]> = Object.fromEntries((draftCanonical?.unified_entities || []).map((e: any) => [e.name, (e.fields || []).map((f: any) => f.name)]));
+    const entityNames = (draftCanonical?.entities || []).map((e: any) => e.name as string);
+    const fieldsByEntity: Record<string, string[]> = Object.fromEntries((draftCanonical?.entities || []).map((e: any) => [e.name, (e.fields || []).map((f: any) => f.name)]));
     const onRelChange = (k: number, patch: any) => {
       setDraftCanonical((prev: any) => {
         const next = JSON.parse(JSON.stringify(prev || {}));
-        next.cross_source_relationships[k] = { ...(next.cross_source_relationships[k] || {}), ...patch };
+        next.relationships[k] = { ...(next.relationships[k] || {}), ...patch };
         return next;
       });
     };
     const addRel = () => {
       setDraftCanonical((prev: any) => {
-        const next = JSON.parse(JSON.stringify(prev || { cross_source_relationships: [] }));
-        (next.cross_source_relationships = next.cross_source_relationships || []).push({ from_entity: '', from_field: '', to_entity: '', to_field: '', type: 'unknown', description: '', confidence: 0 });
+        const next = JSON.parse(JSON.stringify(prev || { relationships: [] }));
+        (next.relationships = next.relationships || []).push({ from_entity: '', to_entity: '', type: 'unknown', join_on: [], confidence: 0 });
         return next;
       });
     };
     const removeRel = (k: number) => {
       setDraftCanonical((prev: any) => {
         const next = JSON.parse(JSON.stringify(prev || {}));
-        next.cross_source_relationships.splice(k, 1);
+        next.relationships.splice(k, 1);
         return next;
       });
     };
@@ -421,7 +423,7 @@ export default function DataRelationshipsPage() {
               <TableCell>To Entity</TableCell>
               <TableCell>To Field</TableCell>
               <TableCell>Type</TableCell>
-              <TableCell>Description</TableCell>
+              <TableCell>Confidence</TableCell>
               <TableCell>Act</TableCell>
             </TableRow>
           </TableHead>
@@ -435,29 +437,35 @@ export default function DataRelationshipsPage() {
                     renderInput={(params) => <TextField {...params} placeholder="entity" />} />
                 </TableCell>
                 <TableCell>
-                  <Autocomplete size="small" sx={{ minWidth: 180 }} options={((fieldsByEntity[r.from_entity] || []) as string[])}
-                    value={r.from_field || ''}
-                    onChange={(_, val) => onRelChange(k, { from_field: val || '' })}
-                    renderInput={(params) => <TextField {...params} placeholder="field" />} />
+                  <Autocomplete size="small" sx={{ minWidth: 240 }} multiple options={((fieldsByEntity[r.from_entity] || []) as string[])}
+                    value={Array.isArray(r.join_on) ? r.join_on.map((p: any) => p.from_field) : []}
+                    onChange={(_, vals) => {
+                      const pairs = (vals as string[]).map((ff: string, idx: number) => ({ from_field: ff, to_field: (r.join_on?.[idx]?.to_field) || '' }));
+                      onRelChange(k, { join_on: pairs });
+                    }}
+                    renderInput={(params) => <TextField {...params} placeholder="from fields" />} />
                 </TableCell>
                 <TableCell>
                   <Autocomplete size="small" sx={{ minWidth: 180 }} options={entityNames}
                     value={r.to_entity || ''}
-                    onChange={(_, val) => onRelChange(k, { to_entity: val || '', to_field: '' })}
+                    onChange={(_, val) => onRelChange(k, { to_entity: val || '', join_on: [] })}
                     renderInput={(params) => <TextField {...params} placeholder="entity" />} />
                 </TableCell>
                 <TableCell>
-                  <Autocomplete size="small" sx={{ minWidth: 180 }} options={((fieldsByEntity[r.to_entity] || []) as string[])}
-                    value={r.to_field || ''}
-                    onChange={(_, val) => onRelChange(k, { to_field: val || '' })}
-                    renderInput={(params) => <TextField {...params} placeholder="field" />} />
+                  <Autocomplete size="small" sx={{ minWidth: 240 }} multiple options={((fieldsByEntity[r.to_entity] || []) as string[])}
+                    value={Array.isArray(r.join_on) ? r.join_on.map((p: any) => p.to_field) : []}
+                    onChange={(_, vals) => {
+                      const pairs = (vals as string[]).map((tf: string, idx: number) => ({ from_field: (r.join_on?.[idx]?.from_field) || '', to_field: tf }));
+                      onRelChange(k, { join_on: pairs });
+                    }}
+                    renderInput={(params) => <TextField {...params} placeholder="to fields" />} />
                 </TableCell>
                 <TableCell>
                   <Select size="small" value={r.type || 'unknown'} onChange={(ev) => onRelChange(k, { type: ev.target.value })}>
                     {['one_to_one','one_to_many','many_to_one','many_to_many','unknown'].map(t => <MenuItem key={t} value={t}>{t}</MenuItem>)}
                   </Select>
                 </TableCell>
-                <TableCell><TextField size="small" fullWidth value={r.description || ''} onChange={(ev) => onRelChange(k, { description: ev.target.value })} /></TableCell>
+                <TableCell><TextField size="small" type="number" inputProps={{ readOnly: true }} sx={{ width: 120 }} value={typeof r.confidence === 'number' ? r.confidence.toFixed(2) : ''} /></TableCell>
                 <TableCell><IconButton size="small" onClick={() => removeRel(k)}><DeleteIcon fontSize="small" /></IconButton></TableCell>
               </TableRow>
             ))}
@@ -530,19 +538,6 @@ export default function DataRelationshipsPage() {
             <AccordionDetails>
               {reviewLoading || savedCanonicalLoading ? (
                 <Box display="flex" justifyContent="center" py={2}><CircularProgress /></Box>
-              ) : savedCanonical ? (
-                <>
-                  <Typography variant="subtitle2">Unified Entities {savedCanonicalVersion ? `(v${savedCanonicalVersion})` : ''}</Typography>
-                  <EntitiesTable entities={savedCanonical?.unified_entities || []} />
-                  <Typography variant="subtitle2" sx={{ mt: 2 }}>Cross-Source Relationships</Typography>
-                  <RelationshipsTable rels={savedCanonical?.cross_source_relationships || []} />
-                  <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
-                    <Button variant="contained" onClick={beginEdit}>Edit Canonical</Button>
-                  </Stack>
-                  {canonicalMessage && (
-                    <Alert severity={canonicalMessage.includes('saved') ? 'success' : 'error'} sx={{ mt: 1 }}>{canonicalMessage}</Alert>
-                  )}
-                </>
               ) : reviewData ? (
                 <>
                   <Typography variant="subtitle2">Preview (AI Suggestions)</Typography>
@@ -560,6 +555,19 @@ export default function DataRelationshipsPage() {
                     <Alert severity={canonicalMessage.includes('saved') ? 'success' : 'error'} sx={{ mt: 1 }}>{canonicalMessage}</Alert>
                   )}
                 </>
+              ) : savedCanonical ? (
+                <>
+                  <Typography variant="subtitle2">Entities {savedCanonicalVersion ? `(v${savedCanonicalVersion})` : ''}</Typography>
+                  <EntitiesTable entities={savedCanonical?.entities || []} />
+                  <Typography variant="subtitle2" sx={{ mt: 2 }}>Relationships</Typography>
+                  <RelationshipsTable rels={savedCanonical?.relationships || []} />
+                  <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
+                    <Button variant="contained" onClick={beginEdit}>Edit Canonical</Button>
+                  </Stack>
+                  {canonicalMessage && (
+                    <Alert severity={canonicalMessage.includes('saved') ? 'success' : 'error'} sx={{ mt: 1 }}>{canonicalMessage}</Alert>
+                  )}
+                </>
               ) : (
                 <Typography variant="body2" color="text.secondary">Run Enrich to see results.</Typography>
               )}
@@ -571,9 +579,9 @@ export default function DataRelationshipsPage() {
               <AccordionSummary expandIcon={<ExpandMoreIcon />}>Editor</AccordionSummary>
               <AccordionDetails>
                 <Typography variant="subtitle2">Draft Entities</Typography>
-                <EditableEntitiesTable entities={draftCanonical?.unified_entities || []} />
+                <EditableEntitiesTable entities={draftCanonical?.entities || []} />
                 <Typography variant="subtitle2" sx={{ mt: 2 }}>Draft Relationships</Typography>
-                <EditableRelationshipsTable rels={draftCanonical?.cross_source_relationships || []} />
+                <EditableRelationshipsTable rels={draftCanonical?.relationships || []} />
                 {validateErrors && validateErrors.length > 0 && (
                   <Alert severity="error" sx={{ mt: 1 }}>
                     <div>Validation errors:</div>

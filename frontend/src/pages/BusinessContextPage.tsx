@@ -106,7 +106,8 @@ export default function BusinessContextPage() {
         const resp = await fetch(`${API_URL}/tenants/${tenantId}/relationships/canonical/latest`, { headers: { Authorization: `Bearer ${token}` } });
         if (!resp.ok) return;
         const result = await resp.json();
-        const ents = (result?.canonical_graph?.unified_entities || []).map((e: any) => ({ name: e.name, fields: (e.fields || []).map((f: any) => f.name) }));
+        const cg = result?.canonical_graph || {};
+        const ents = (cg.entities || []).map((e: any) => ({ name: e.name, fields: (e.fields || []).map((f: any) => f.name) }));
         setEntities(ents);
       } catch {}
     })();

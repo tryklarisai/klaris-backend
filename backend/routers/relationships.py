@@ -125,49 +125,55 @@ def create_dataset_review(
     }
     system = "You are a precise data modeling assistant. Return ONLY valid JSON matching the provided output schema."
     output_hint = {
-        "unified_entities": [
+        "version": "pilot-1",
+        "generated_at": "ISO-8601 UTC timestamp",
+        "entities": [
             {
                 "name": "string",
                 "description": "string",
                 "tags": ["string"],
-                "confidence": 0.0,
                 "fields": [
                     {
                         "name": "string",
                         "description": "string",
-                        "semantic_type": "string",
-                        "pii_sensitivity": "none|low|medium|high",
-                        "nullable": True,
                         "data_type": "string",
-                        "confidence": 0.0
+                        "semantic_type": "string",
+                        "nullable": True,
+                        "primary_key": False,
+                        "is_join_key": False,
+                        "pii": "none|low|medium|high",
+                        "masking": "string",
+                        "confidence": 0.0,
+                        "mappings": [
+                            {"connector_id": "uuid", "source_entity": "string", "source_field": "string", "confidence": 0.0}
+                        ]
                     }
-                ],
-                "source_mappings": [
-                    {"connector_id": "uuid", "table": "string", "field": "string", "confidence": 0.0}
-                ],
+                ]
             }
         ],
-        "cross_source_relationships": [
+        "relationships": [
             {
-                "from_entity": "string",
-                "from_field": "string",
-                "to_entity": "string",
-                "to_field": "string",
                 "type": "one_to_one|one_to_many|many_to_one|many_to_many|unknown",
-                "description": "string",
+                "from_entity": "string",
+                "to_entity": "string",
+                "join_on": [ { "from_field": "string", "to_field": "string" } ],
                 "confidence": 0.0
             }
         ]
     }
     # Build prompt in parts to avoid accidental truncation/escaping issues
     prompt_intro = (
-        "You are given multiple connector schemas (structure only). Build a unified global ontology with entities and fields mapped across sources,"
-        " including PII classification and semantic types, and infer cross-source relationships."
+        "You are given multiple connector schemas (structure only). Build a simplified, connector-agnostic global canonical schema with: "
+        "(a) entities (with fields, basic types, semantic types, nullability, primary keys, join keys, and PII), and "
+        "(b) relationships (with type and join key pairs)."
     )
     prompt_instr = (
-        "Return valid JSON only matching this output format: " + json.dumps(output_hint) +
-        "\nRequirements: (1) Cover ALL input entities across ALL connectors. "
-        "(2) For each unified entity, include source_mappings for every contributing input entity with connector_id and entity/table/field names."
+        "Return valid JSON ONLY matching this exact output format: " + json.dumps(output_hint) +
+        "\nRequirements: (1) Include top-level 'version' with value 'pilot-1' and 'generated_at' as ISO-8601 UTC." \
+        + " (2) Cover ALL input entities across ALL connectors." \
+        + " (3) For each entity, include 'tags' as relevant keywords." \
+        + " (4) For each field, include 'description' and 'confidence' (0..1), and per-source mappings (connector_id, source_entity, source_field, confidence)." \
+        + " (5) Provide a confidence (0..1) for each relationship."
     )
     prompt_data = "Input entities JSON array:\n" + json.dumps(snapshot["input_entities"])  # compact to reduce length
     prompt = prompt_intro + "\n" + prompt_instr + "\n\n" + prompt_data
@@ -186,7 +192,7 @@ def create_dataset_review(
         # Chunking to avoid timeouts and token overflows
         max_per_call = int(os.getenv("DATASET_REVIEW_MAX_ENTITIES_PER_CALL", "150"))
         chunks = [input_entities[i:i+max_per_call] for i in range(0, len(input_entities), max_per_call)]
-        merged = {"unified_entities": [], "cross_source_relationships": []}
+        merged = {"version": "pilot-1", "generated_at": None, "entities": [], "relationships": []}
         total_usage: dict = {}
 
         def accumulate_usage(dst: dict, src: dict):
@@ -207,43 +213,82 @@ def create_dataset_review(
             chunk_snapshot = {**snapshot, "input_entities": chunk}
             chunk_prompt = prompt_intro + "\n" + prompt_instr + "\n\n" + ("Input entities JSON array:\n" + json.dumps(chunk))
             parsed, usage = client.review_schema(prompt=chunk_prompt, system=system)
-            # Merge results
-            ue = parsed.get("unified_entities") or []
-            csr = parsed.get("cross_source_relationships") or []
-            # Deduplicate unified entities by name (case-insensitive)
-            existing_names = { (e.get("name") or "").lower(): i for i, e in enumerate(merged["unified_entities"]) }
-            for e in ue:
+            # Merge results (pilot format)
+            ents = parsed.get("entities") or []
+            rels = parsed.get("relationships") or []
+            # Keep first generated_at if provided
+            if not merged.get("generated_at"):
+                ga = parsed.get("generated_at")
+                if isinstance(ga, str) and ga:
+                    merged["generated_at"] = ga
+            # Deduplicate entities by name (case-insensitive)
+            existing_names = { (e.get("name") or "").lower(): i for i, e in enumerate(merged["entities"]) }
+            for e in ents:
                 key = (e.get("name") or "").lower()
                 if key in existing_names:
-                    tgt = merged["unified_entities"][existing_names[key]]
-                    # Merge fields by name
+                    tgt = merged["entities"][existing_names[key]]
+                    # Merge fields by name, and merge per-field mappings
                     def merge_fields(a, b):
-                        seen = { (f.get("name") or "").lower() for f in a }
+                        index = { (f.get("name") or "").lower(): f for f in a }
                         for f in b:
-                            if (f.get("name") or "").lower() not in seen:
+                            fk = (f.get("name") or "").lower()
+                            if fk in index:
+                                tf = index[fk]
+                                tmap = tf.get("mappings") or []
+                                mmap = f.get("mappings") or []
+                                seen_map = { (m.get("connector_id"), (m.get("source_entity") or "").lower(), (m.get("source_field") or "").lower()) for m in tmap }
+                                for m in mmap:
+                                    sig = (m.get("connector_id"), (m.get("source_entity") or "").lower(), (m.get("source_field") or "").lower())
+                                    if sig not in seen_map:
+                                        tmap.append(m)
+                                if tmap:
+                                    tf["mappings"] = tmap
+                                # Merge field description and confidence
+                                if not (str(tf.get("description") or "").strip()) and str(f.get("description") or "").strip():
+                                    tf["description"] = f.get("description")
+                                try:
+                                    tfc = float(tf.get("confidence")) if tf.get("confidence") is not None else None
+                                except Exception:
+                                    tfc = None
+                                try:
+                                    fc = float(f.get("confidence")) if f.get("confidence") is not None else None
+                                except Exception:
+                                    fc = None
+                                if fc is not None and (tfc is None or fc > tfc):
+                                    tf["confidence"] = fc
+                            else:
                                 a.append(f)
                         return a
                     tgt["fields"] = merge_fields(tgt.get("fields", []), e.get("fields", []))
-                    # Merge source_mappings
-                    tgt_sm = tgt.get("source_mappings", [])
-                    seen_sm = { (m.get("connector_id"), m.get("table"), m.get("field")) for m in tgt_sm }
-                    for m in e.get("source_mappings", []):
-                        keym = (m.get("connector_id"), m.get("table"), m.get("field"))
-                        if keym not in seen_sm:
-                            tgt_sm.append(m)
-                    tgt["source_mappings"] = tgt_sm
+                    # Keep first non-empty description
+                    tgt_desc = (tgt.get("description") or "").strip()
+                    e_desc = (e.get("description") or "").strip()
+                    if not tgt_desc and e_desc:
+                        tgt["description"] = e.get("description")
+                    # Union tags
+                    tgt_tags = set((tgt.get("tags") or []))
+                    new_tags = [t for t in (e.get("tags") or []) if isinstance(t, str) and t.strip()]
+                    if new_tags:
+                        tgt["tags"] = sorted(list(tgt_tags.union(new_tags)))
                 else:
-                    merged["unified_entities"].append(e)
-                    existing_names[key] = len(merged["unified_entities"]) - 1
-            # Merge relationships by tuple key
-            seen_rel = { (r.get("from_entity"), r.get("from_field"), r.get("to_entity"), r.get("to_field"), r.get("type")) for r in merged["cross_source_relationships"] }
-            for r in csr:
-                keyr = (r.get("from_entity"), r.get("from_field"), r.get("to_entity"), r.get("to_field"), r.get("type"))
-                if keyr not in seen_rel:
-                    merged["cross_source_relationships"].append(r)
+                    merged["entities"].append(e)
+                    existing_names[key] = len(merged["entities"]) - 1
+            # Merge relationships by composite key
+            def rel_key(rel: dict):
+                jt = tuple(sorted([ (p.get("from_field"), p.get("to_field")) for p in (rel.get("join_on") or []) ]))
+                return (rel.get("from_entity"), rel.get("to_entity"), rel.get("type"), jt)
+            seen_rel = { rel_key(r) for r in merged["relationships"] }
+            for r in rels:
+                k = rel_key(r)
+                if k not in seen_rel:
+                    merged["relationships"].append(r)
             # Accumulate usage
             accumulate_usage(total_usage, usage or {})
 
+        # Ensure generated_at is set
+        if not merged.get("generated_at"):
+            from datetime import datetime as dt
+            merged["generated_at"] = dt.utcnow().isoformat() + "Z"
         review.suggestions = merged
         review.status = ReviewStatusEnum.succeeded.value
         review.token_usage = total_usage
@@ -307,7 +352,7 @@ def save_global_canonical(
         tenant_id=tenant_id,
         version=next_version,
         base_schema_ids=[str(x) for x in body.base_schema_ids],
-        canonical_graph=body.user_edits,
+        canonical_graph=body.user_edits or {},
         note=body.note,
         approved_by_user_id=(ctx.get("user") or {}).get("user_id"),
         approved_at=dt.utcnow(),
@@ -371,8 +416,9 @@ def validate_canonical(
     max_fields = int(os.getenv("REL_MAX_FIELDS_PER_ENTITY", "500"))
     max_rels = int(os.getenv("REL_MAX_RELATIONSHIPS", "5000"))
 
-    ents = graph.get("unified_entities") or []
-    rels = graph.get("cross_source_relationships") or []
+    # Pilot-only shape
+    ents = graph.get("entities") or []
+    rels = graph.get("relationships") or []
 
     if not isinstance(ents, list):
         add_err("/unified_entities", "must be a list")
@@ -404,7 +450,7 @@ def validate_canonical(
                     if fk in seen_f:
                         add_err(f"/unified_entities[{i}]/fields[{j}]/name", "duplicate field name")
                     seen_f.add(fk)
-                    pii = (f.get("pii_sensitivity") or "none").lower()
+                    pii = (f.get("pii_sensitivity") or f.get("pii") or "none").lower()
                     if pii not in ("none", "low", "medium", "high"):
                         add_err(f"/unified_entities[{i}]/fields[{j}]/pii_sensitivity", "invalid enum")
 
@@ -412,29 +458,45 @@ def validate_canonical(
         add_err("/cross_source_relationships", "must be a list")
     else:
         if len(rels) > max_rels:
-            add_err("/cross_source_relationships", f"too many relationships (>{max_rels})")
+            add_err("/relationships", f"too many relationships (>{max_rels})")
         # Reference validation
         ent_index = { (e.get("name") or "").lower(): e for e in ents if isinstance(e, dict) }
         for k, r in enumerate(rels):
             t = (r.get("type") or "unknown").lower()
             if t not in ("one_to_one", "one_to_many", "many_to_one", "many_to_many", "unknown"):
-                add_err(f"/cross_source_relationships[{k}]/type", "invalid enum")
+                add_err(f"/relationships[{k}]/type", "invalid enum")
             fe = (r.get("from_entity") or "").lower()
             te = (r.get("to_entity") or "").lower()
             if fe not in ent_index:
-                add_err(f"/cross_source_relationships[{k}]/from_entity", "unknown entity")
+                add_err(f"/relationships[{k}]/from_entity", "unknown entity")
             if te not in ent_index:
-                add_err(f"/cross_source_relationships[{k}]/to_entity", "unknown entity")
+                add_err(f"/relationships[{k}]/to_entity", "unknown entity")
+            # Support legacy single from_field/to_field and pilot join_on list
             ff = r.get("from_field")
             tf = r.get("to_field")
-            if ff:
-                fields = ent_index.get(fe, {}).get("fields", [])
-                if (ff.lower() if isinstance(ff, str) else "") not in { (f.get("name") or "").lower() for f in fields }:
-                    add_err(f"/cross_source_relationships[{k}]/from_field", "unknown field for from_entity")
-            if tf:
-                fields = ent_index.get(te, {}).get("fields", [])
-                if (tf.lower() if isinstance(tf, str) else "") not in { (f.get("name") or "").lower() for f in fields }:
-                    add_err(f"/cross_source_relationships[{k}]/to_field", "unknown field for to_entity")
+            join_on = r.get("join_on") or []
+            if ff or tf:
+                if ff:
+                    fields = ent_index.get(fe, {}).get("fields", [])
+                    if (ff.lower() if isinstance(ff, str) else "") not in { (f.get("name") or "").lower() for f in fields }:
+                        add_err(f"/relationships[{k}]/from_field", "unknown field for from_entity")
+                if tf:
+                    fields = ent_index.get(te, {}).get("fields", [])
+                    if (tf.lower() if isinstance(tf, str) else "") not in { (f.get("name") or "").lower() for f in fields }:
+                        add_err(f"/relationships[{k}]/to_field", "unknown field for to_entity")
+            elif isinstance(join_on, list) and len(join_on) > 0:
+                for idxp, p in enumerate(join_on):
+                    pf = (p.get("from_field") or "").lower()
+                    pt = (p.get("to_field") or "").lower()
+                    if not pf or not pt:
+                        add_err(f"/relationships[{k}]/join_on[{idxp}]", "from_field and to_field required")
+                        continue
+                    ffields = ent_index.get(fe, {}).get("fields", [])
+                    tfields = ent_index.get(te, {}).get("fields", [])
+                    if pf not in { (f.get("name") or "").lower() for f in ffields }:
+                        add_err(f"/relationships[{k}]/join_on[{idxp}]/from_field", "unknown field for from_entity")
+                    if pt not in { (f.get("name") or "").lower() for f in tfields }:
+                        add_err(f"/relationships[{k}]/join_on[{idxp}]/to_field", "unknown field for to_entity")
 
     if errors:
         return {"ok": False, "errors": errors}
