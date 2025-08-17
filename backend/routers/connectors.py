@@ -176,9 +176,11 @@ def google_drive_callback(request: Request, db: Session = Depends(get_db)):
     )
     db.add(connector)
     db.commit()
-    # Optional: redirect back to frontend with connector_id as param
-    frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000/dashboard?gdrive=success")
-    return RedirectResponse(frontend_url)
+    # Redirect back to the Connectors list page on the frontend.
+    # FRONTEND_URL is expected to be just the host (e.g., https://demo.tryklaris.ai)
+    base = os.getenv("FRONTEND_URL", "http://localhost:3000")
+    redirect_url = f"{base.rstrip('/')}/connectors?gdrive=success"
+    return RedirectResponse(redirect_url)
 
 # Original connectors CRUD API
 router = APIRouter(prefix="/tenants/{tenant_id}/connectors", tags=["Connectors"])
