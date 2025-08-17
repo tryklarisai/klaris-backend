@@ -112,15 +112,9 @@ def _compute_relationship_card(version: str, generated_at: str, rel: dict) -> Tu
 
 
 def _embed_texts(texts: List[str]) -> List[List[float]]:
-    # Provider/model/API key are read inside LLM client config
-    # IMPORTANT: Use a true embedding endpoint, not chat. Here we use OpenAI via langchain-openai if available
-    from langchain_openai import OpenAIEmbeddings
-    model = os.getenv("EMBEDDING_MODEL", os.getenv("LLM_EMBEDDING_MODEL", "text-embedding-3-small"))
-    api_key = os.getenv("EMBEDDING_API_KEY", os.getenv("LLM_API_KEY"))
-    if not api_key:
-        raise RuntimeError("Missing EMBEDDING_API_KEY/LLM_API_KEY for embeddings")
-    embedder = OpenAIEmbeddings(model=model, api_key=api_key)
-    return embedder.embed_documents(texts)
+    from services.embeddings import get_embeddings_client
+    client = get_embeddings_client()
+    return client.embed(texts)
 
 
 def upsert_cards(db: Session, tenant_id: str, canonical: Dict[str, Any]) -> Dict[str, Any]:
