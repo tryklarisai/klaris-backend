@@ -7,15 +7,31 @@ Implements: fetch_schema(config: dict, metadata: dict = None) -> dict
 from typing import Dict, Any, Optional
 import sqlalchemy
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine.url import make_url
 import random
 
 class PostgresMCPAdapter:
     @staticmethod
-    def list_tables(config: Dict[str, Any]) -> list[Dict[str, Any]]:
+    def _build_pg_url(config: Dict[str, Any]) -> str:
         """
-        Lightweight listing of user tables without fetching sample rows.
-        Returns a list of {schema, table, name} where name is "schema.table".
+        Build a SQLAlchemy Postgres URL from config.
+        Accepts either discrete keys (user, password, host, port, database) or
+        a full DSN/URL under one of: url, dsn, database_url, DATABASE_URL.
         """
+        # Prefer explicit URL/DSN if provided
+        url = (
+            config.get("url")
+            or config.get("dsn")
+            or config.get("database_url")
+            or config.get("DATABASE_URL")
+        )
+        if url:
+            try:
+                # Validate/normalize
+                return str(make_url(url))
+            except Exception as e:
+                raise RuntimeError(f"Invalid Postgres URL/DSN in config: {e}")
+
         user = config.get("user")
         password = config.get("password")
         host = config.get("host")
@@ -23,9 +39,18 @@ class PostgresMCPAdapter:
         database = config.get("database")
 
         if not all([user, password, host, database]):
-            raise RuntimeError("Missing Postgres connection config.")
+            raise RuntimeError(
+                "Missing Postgres connection config. Provide either a URL/DSN or user, password, host, database (optional port)."
+            )
 
-        url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
+        return f"postgresql://{user}:{password}@{host}:{port}/{database}"
+    @staticmethod
+    def list_tables(config: Dict[str, Any]) -> list[Dict[str, Any]]:
+        """
+        Lightweight listing of user tables without fetching sample rows.
+        Returns a list of {schema, table, name} where name is "schema.table".
+        """
+        url = PostgresMCPAdapter._build_pg_url(config)
         engine = create_engine(url)
         inspector = inspect(engine)
         out: list[Dict[str, Any]] = []
@@ -41,6 +66,8 @@ class PostgresMCPAdapter:
                     })
         finally:
             engine.dispose()
+        # Deterministic ordering
+        out.sort(key=lambda t: (t.get("schema") or "", t.get("table") or "", t.get("name") or ""))
         return out
 
     @staticmethod
@@ -49,17 +76,8 @@ class PostgresMCPAdapter:
         Fetches table and column info (limited to optional metadata['selected_table_names'] list),
         and includes up to 10 sample rows per table.
         """
-        # Expected config keys: host, port, user, password, database
-        user = config.get("user")
-        password = config.get("password")
-        host = config.get("host")
-        port = config.get("port") or 5432
-        database = config.get("database")
-
-        if not all([user, password, host, database]):
-            raise RuntimeError("Missing Postgres connection config.")
-
-        url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
+        # Accept either discrete fields or DSN/URL
+        url = PostgresMCPAdapter._build_pg_url(config)
         engine = create_engine(url)
         inspector = inspect(engine)
 
@@ -75,16 +93,22 @@ class PostgresMCPAdapter:
             # Only include public/user schemas
             if schema.startswith("pg_") or schema == "information_schema":
                 continue
-            for table_name in inspector.get_table_names(schema=schema):
+            # Deterministic ordering of tables within schema
+            table_names = inspector.get_table_names(schema=schema)
+            table_names.sort()
+            for table_name in table_names:
                 if selected_tables and f"{schema}.{table_name}" not in selected_tables and table_name not in selected_tables:
                     continue
+                cols_raw = inspector.get_columns(table_name, schema=schema)
                 columns = [
                     {
                         "name": col["name"],
                         "type": str(col["type"])
                     }
-                    for col in inspector.get_columns(table_name, schema=schema)
+                    for col in cols_raw
                 ]
+                # Deterministic ordering of columns
+                columns.sort(key=lambda c: c.get("name") or "")
                 # Get sample rows
                 try:
                     with engine.connect() as conn:
@@ -115,4 +139,6 @@ class PostgresMCPAdapter:
                     "samples": [{"rows": sample_rows}] if sample_rows else []
                 })
         engine.dispose()
+        # Deterministic ordering of entities
+        entities.sort(key=lambda e: e.get("name") or "")
         return {"entities": entities}

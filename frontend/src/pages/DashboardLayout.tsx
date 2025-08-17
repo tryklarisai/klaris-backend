@@ -26,6 +26,7 @@ import WorkIcon from '@mui/icons-material/WorkOutline';
 import LogoutIcon from '@mui/icons-material/Logout';
 import Brightness4Icon from '@mui/icons-material/Brightness4';
 import Brightness7Icon from '@mui/icons-material/Brightness7';
+import ChatIcon from '@mui/icons-material/Chat';
 import { ModeContext } from "../theme/ThemeProvider";
 import { config } from "../config";
 
@@ -35,7 +36,8 @@ const mainMenu = [
   { key: "dashboard", label: "Dashboard", path: "/", icon: <DashboardIcon fontSize="small" /> },
   { key: "connectors", label: "Connectors", path: "/connectors", icon: <ExtensionIcon fontSize="small" /> },
   { key: "relationships", label: "Data Relationships", path: "/relationships", icon: <SchemaIcon fontSize="small" /> },
-  { key: "business-context", label: "Business Context", path: "/business-context", icon: <WorkIcon fontSize="small" /> }
+  { key: "business-context", label: "Business Context", path: "/business-context", icon: <WorkIcon fontSize="small" /> },
+  { key: "chat", label: "Chat", path: "/chat", icon: <ChatIcon fontSize="small" /> }
 ];
 
 export default function DashboardLayout() {

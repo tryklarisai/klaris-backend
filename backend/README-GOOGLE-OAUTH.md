@@ -7,9 +7,11 @@ This guide explains how to set up the credentials and consent screen required fo
 1. Sign in to https://console.cloud.google.com/
 2. Create or select a project for KlarisAI connectors.
 
-## Step 2: Enable Google Drive API
+## Step 2: Enable Google Drive & Sheets APIs
 1. Go to "APIs & Services" > "Library".
-2. Search for **Google Drive API** and click **Enable**.
+2. Enable:
+   - **Google Drive API**
+   - **Google Sheets API**
 
 ## Step 3: Configure OAuth Consent Screen
 1. Under "APIs & Services" > "OAuth consent screen", 
@@ -17,6 +19,7 @@ This guide explains how to set up the credentials and consent screen required fo
 3. Fill in app info (app name, user support email, etc.).
 4. Add **Scopes**:
    - `https://www.googleapis.com/auth/drive.readonly`
+   - `https://www.googleapis.com/auth/spreadsheets.readonly`
 5. Add test users (your Gmail for testing).
 
 ## Step 4: Create OAuth 2.0 Credentials
@@ -26,19 +29,19 @@ This guide explains how to set up the credentials and consent screen required fo
 4. Name it (e.g., "Klaris Google Drive Backend").
 5. **Authorized redirect URIs** (add this for local/dev):
 
-       http://localhost:8000/tenants/<tenant_id>/connectors/google-drive/callback
+       http://localhost:8000/connectors/google-drive/callback
 
-   (Substitute `<tenant_id>` at runtime. For development/testing, `localhost:8000` is standard.)
+   Note: Our backend exposes a root-level callback at `/connectors/google-drive/callback` and uses the OAuth `state` parameter to carry the tenant_id.
 6. Click **Create**.
 7. Download/save your `client_id` and `client_secret`.
 
 ## Step 5: Update Environment Variables
-Edit your `/backend/.env`:
+Edit your `/backend/.env` (replace placeholders):
 
 ```
-GOOGLE_CLIENT_ID=your_client_id_here
-GOOGLE_CLIENT_SECRET=your_client_secret_here
-GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/tenants/<tenant_id>/connectors/google-drive/callback
+GOOGLE_CLIENT_ID=YOUR_CLIENT_ID
+GOOGLE_CLIENT_SECRET=YOUR_CLIENT_SECRET
+GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/connectors/google-drive/callback
 LLM_PROVIDER=anthropic
 LLM_MODEL=claude-3-5-sonnet-20240620
 LLM_API_KEY=your_anthropic_key

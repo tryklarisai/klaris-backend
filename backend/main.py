@@ -1,3 +1,4 @@
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers.tenants import router as tenant_router
@@ -6,6 +7,10 @@ from routers.connectors import router as connector_router, oauth_router
 from routers.relationships import router as relationships_router
 from routers.business_context import router as business_context_router
 from routers.schemas import router as schema_router
+from routers.chat import router as chat_router
+
+# Configure root logging (simple stdout handler)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 app = FastAPI()
 
@@ -24,6 +29,7 @@ app.include_router(oauth_router)  # Mount root-level Google OAuth endpoints
 app.include_router(schema_router)
 app.include_router(relationships_router)
 app.include_router(business_context_router)
+app.include_router(chat_router)
 
 @app.get("/api/health")
 def health():

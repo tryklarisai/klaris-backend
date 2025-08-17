@@ -3,7 +3,7 @@ uvicorn[standard]==0.30.1
 SQLAlchemy==2.0.30
 alembic==1.13.1
 psycopg2-binary==2.9.9
-pydantic==2.7.1
+pydantic==2.9.2
 pytest==8.2.2
 httpx==0.28.1
 ruff==0.4.4
@@ -11,12 +11,20 @@ passlib[bcrypt]==1.7.4
 bcrypt<4.1.0
 pyjwt==2.8.0
 requests==2.32.2
-anthropic==0.37.1
-openai==1.37.1
+anthropic==0.60.0
+openai==1.60.0
 
 # Google OAuth2 and Google Drive dependencies
 google-auth-oauthlib==1.2.0
 google-api-python-client==2.130.0
+gspread==6.0.2
 pandas==2.2.2
 openpyxl==3.1.2
 xlrd>=2.0.1
+
+# LangGraph/LangChain for chat agent (aligned versions)
+langgraph==0.2.33
+langchain-core==0.3.72
+langchain-openai==0.2.7
+langchain-anthropic==0.3.18
+langchain>=0.3.22,<0.4.0

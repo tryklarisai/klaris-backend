@@ -18,6 +18,7 @@ from schemas.connector import (
 )
 
 import os
+import time
 from urllib.parse import urlencode
 from fastapi.responses import RedirectResponse
 
@@ -73,7 +74,7 @@ def google_drive_authorize(request: Request):
         raise HTTPException(status_code=500, detail="OAuth env not configured")
     if tenant_id is None:
         raise HTTPException(status_code=400, detail="Missing tenant_id query parameter")
-    scope = "https://www.googleapis.com/auth/drive.readonly"
+    scope = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/spreadsheets.readonly"
     # Secure random CSRF token (nonce)
     csrf_token = secrets.token_urlsafe(16)
     state = f"{csrf_token}:{tenant_id}"
@@ -128,9 +129,26 @@ def google_drive_callback(request: Request, db: Session = Depends(get_db)):
         "redirect_uri": redirect_uri,
         "grant_type": "authorization_code"
     }
-    token_resp = pyrequests.post(token_url, data=data, timeout=8)
-    if token_resp.status_code != 200:
-        raise HTTPException(status_code=400, detail=f"Token exchange failed: {token_resp.text}")
+    # Retry token exchange with exponential backoff to handle transient network issues
+    attempts = 3
+    backoff = 1.0
+    token_resp = None
+    last_err = None
+    for i in range(attempts):
+        try:
+            # Use a (connect, read) timeout tuple
+            token_resp = pyrequests.post(token_url, data=data, timeout=(5, 30))
+            break
+        except pyrequests.exceptions.RequestException as e:
+            last_err = e
+            if i < attempts - 1:
+                time.sleep(backoff)
+                backoff *= 2
+            else:
+                raise HTTPException(status_code=503, detail=f"Google token endpoint unreachable: {str(e)}")
+    if token_resp is None or token_resp.status_code != 200:
+        detail = token_resp.text if token_resp is not None else str(last_err)
+        raise HTTPException(status_code=400, detail=f"Token exchange failed: {detail}")
     token_json = token_resp.json()
     # tokens
     access_token = token_json.get("access_token")
@@ -233,10 +251,12 @@ def list_selectable_items(
         if ctype == "postgres":
             tables = PostgresMCPAdapter.list_tables(conn.config)
             # Normalize to the same shape the UI expects: {id, name, mimeType}
-            return [
+            items = [
                 {"id": t["name"], "name": t["name"], "mimeType": t["schema"]}
                 for t in tables
             ]
+            items.sort(key=lambda x: x.get("name") or "")
+            return items
         raise HTTPException(status_code=400, detail=f"Unsupported connector type: {conn.type}")
     except HTTPException:
         raise
@@ -336,6 +356,8 @@ def list_connectors(
     db: Session = Depends(get_db)
 ):
     connectors = db.query(Connector).filter_by(tenant_id=tenant_id).all()
+    # Deterministic ordering: by type then connector_id
+    connectors.sort(key=lambda c: ((c.type or "").lower(), str(getattr(c, "connector_id", ""))))
     result = []
     for conn in connectors:
         last_schema = db.query(Schema).filter_by(

@@ -43,6 +43,8 @@ class GoogleDriveMCPAdapter:
             pageSize=1000
         ).execute()
         files = files_response.get("files", [])
+        # Deterministic ordering: by name then id
+        files.sort(key=lambda f: (f.get("name") or "", f.get("id") or ""))
         return files
 
     @staticmethod
@@ -96,6 +98,9 @@ class GoogleDriveMCPAdapter:
             selected_ids = set(metadata["selected_drive_file_ids"])
             files = [f for f in files if f["id"] in selected_ids]
 
+        # Deterministic ordering of files for schema generation
+        files.sort(key=lambda f: (f.get("name") or "", f.get("id") or ""))
+
         entities = []
         for f in files:
             file_id = f["id"]
@@ -111,6 +116,8 @@ class GoogleDriveMCPAdapter:
 
                     meta = sheets_service.spreadsheets().get(spreadsheetId=file_id).execute()
                     sheets_meta = meta.get("sheets", [])[:max_sheets]
+                    # Deterministic ordering of sheets by title
+                    sheets_meta.sort(key=lambda sh: (sh.get("properties", {}) or {}).get("title") or "")
 
                     # Column limit window for faster reads (A.. letter for max cols)
                     max_cols = int(os.getenv("GDRIVE_SHEET_MAX_COLS", "500"))
@@ -188,7 +195,7 @@ class GoogleDriveMCPAdapter:
                     except Exception:
                         sheets = pd.read_excel(file_io, sheet_name=None, nrows=200)
                     sample_rows_limit = int(os.getenv("GDRIVE_SHEET_SAMPLE_ROWS", "10"))
-                    for title, df in sheets.items():
+                    for title, df in sorted(sheets.items(), key=lambda kv: kv[0]):
                         if isinstance(df, pd.DataFrame) and not df.empty:
                             df = df.astype(str)
                             rows_df = df.sample(n=min(sample_rows_limit, len(df))).to_dict(orient="records")
@@ -228,4 +235,6 @@ class GoogleDriveMCPAdapter:
                     "fields": [],
                     "samples": [],
                 })
+        # Deterministic ordering of entities
+        entities.sort(key=lambda e: (e.get("name") or "", e.get("id") or ""))
         return {"entities": entities}
