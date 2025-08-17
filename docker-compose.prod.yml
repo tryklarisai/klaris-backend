@@ -48,7 +48,6 @@ services:
     restart: unless-stopped
 
   frontend:
-    build: ./frontend
     build:
       context: ./frontend
       args:
