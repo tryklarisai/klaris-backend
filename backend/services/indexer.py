@@ -155,7 +155,7 @@ def upsert_cards(db: Session, tenant_id: str, canonical: Dict[str, Any]) -> Dict
     texts = [t for (t, _, _) in entity_cards + field_cards + rel_cards]
     embeddings = _embed_texts(texts)
 
-    # Upsert into pgvector-backed table (embedding stored as float[])
+    # Upsert into pgvector-backed table (embedding stored as pgvector 'vector' type)
     now_iso = datetime.utcnow().isoformat()
     rows = []
     for idx, (t, m, k) in enumerate(entity_cards + field_cards + rel_cards):
@@ -176,11 +176,12 @@ def upsert_cards(db: Session, tenant_id: str, canonical: Dict[str, Any]) -> Dict
         stmt = text(
             """
             INSERT INTO vector_cards (card_id, tenant_id, key_kind, key_hash, card_text, metadata, embedding, created_at, updated_at)
-            VALUES (gen_random_uuid(), :tenant_id, :key_kind, :key_hash, :card_text, CAST(:metadata AS JSONB), :embedding::float8[], :created_at, :updated_at)
+            VALUES (gen_random_uuid(), :tenant_id, :key_kind, :key_hash, :card_text, CAST(:metadata AS JSONB), :embedding, :created_at, :updated_at)
             ON CONFLICT (tenant_id, key_kind, key_hash)
             DO UPDATE SET card_text = EXCLUDED.card_text, metadata = EXCLUDED.metadata, embedding = EXCLUDED.embedding, updated_at = EXCLUDED.updated_at
             """
         )
+        # psycopg2/pgvector expects a python list for vector; many drivers cast it implicitly
         db.execute(stmt, r)
     db.commit()
 

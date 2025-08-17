@@ -18,6 +18,7 @@ from models.schema import Schema
 from models.schema_review import DatasetReview, GlobalCanonicalSchema, ReviewStatusEnum
 from services.llm_client import get_llm_client
 from pydantic import BaseModel, UUID4, Field
+from sqlalchemy import text as sql_text
 from services.indexer import upsert_cards
 
 
@@ -376,6 +377,49 @@ def build_index(
     # Upsert into vector index
     res = upsert_cards(db, tenant_id, cg)
     return {"ok": True, "counts": res}
+
+
+@router.get("/index/stats")
+def index_stats(
+    tenant_id: str,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    check_auth_and_tenant(credentials, tenant_id)
+    q = sql_text(
+        "SELECT key_kind, COUNT(*) AS cnt FROM vector_cards WHERE tenant_id = :tenant_id GROUP BY key_kind"
+    )
+    rows = db.execute(q, {"tenant_id": tenant_id}).mappings().all()
+    return {"counts": {r["key_kind"]: int(r["cnt"]) for r in rows}}
+
+
+@router.get("/index/search")
+def index_search(
+    tenant_id: str,
+    q: str,
+    top_k: int = 10,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    check_auth_and_tenant(credentials, tenant_id)
+    # Embed query
+    from services.indexer import _embed_texts  # reuse internal helper
+    vec = _embed_texts([q])[0]
+    # Cosine distance search using pgvector operator <#>
+    stmt = sql_text(
+        """
+        SELECT key_kind, key_hash, card_text, metadata, 1 - (embedding <#> :query_vec) AS score
+        FROM vector_cards
+        WHERE tenant_id = :tenant_id
+        ORDER BY embedding <#> :query_vec ASC
+        LIMIT :top_k
+        """
+    )
+    rows = db.execute(stmt, {"tenant_id": tenant_id, "query_vec": vec, "top_k": top_k}).mappings().all()
+    return {"results": [
+        {"key_kind": r["key_kind"], "card_text": r["card_text"], "metadata": r["metadata"], "score": float(r["score"]) }
+        for r in rows
+    ]}
 
 
 @router.get("/canonical/latest")
