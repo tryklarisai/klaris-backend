@@ -10,6 +10,7 @@ from typing import List, Optional
 from uuid import UUID
 import os
 import jwt
+import logging
 
 from db import get_db
 from models.connector import Connector
@@ -20,6 +21,8 @@ from pydantic import BaseModel, UUID4, Field
 
 
 router = APIRouter(prefix="/tenants/{tenant_id}/relationships", tags=["Data Relationships"])
+
+logger = logging.getLogger(__name__)
 
 JWT_SECRET = os.getenv("JWT_SECRET", "insecure-placeholder-change-in-env")
 JWT_ALGORITHM = "HS256"
@@ -54,6 +57,7 @@ def create_dataset_review(
     credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
 ):
     ctx = check_auth_and_tenant(credentials, tenant_id)
+    logger.info("[relationships] create_dataset_review start tenant_id=%s", tenant_id)
     # Validate connectors and fetch latest schemas per connector
     if not body.connector_ids:
         raise HTTPException(status_code=400, detail="connector_ids required")
@@ -62,6 +66,7 @@ def create_dataset_review(
     selected = [c for c in connectors if str(c.connector_id) in id_set and c.status.value == "active"]
     if not selected:
         raise HTTPException(status_code=400, detail="No active connectors selected")
+    logger.info("[relationships] selected_connectors=%d", len(selected))
     latest_schemas: List[Schema] = []
     connector_by_id = {str(c.connector_id): c for c in selected}
     for c in selected:
@@ -70,6 +75,7 @@ def create_dataset_review(
             latest_schemas.append(s)
     if not latest_schemas:
         raise HTTPException(status_code=400, detail="No schemas available for selected connectors")
+    logger.info("[relationships] latest_schemas=%d", len(latest_schemas))
 
     provider, model, client = get_llm_client()
     options = body.options or CreateDatasetReviewOptions()
@@ -115,6 +121,7 @@ def create_dataset_review(
                 "kind": e.get("kind"),
                 "fields": e.get("fields", []),
             })
+    logger.info("[relationships] built input_entities count=%d", len(input_entities))
 
     # Build coverage manifest to guarantee we don't drop any fields
     manifest: list[dict] = []
@@ -130,6 +137,7 @@ def create_dataset_review(
                 "field_name": f.get("name"),
                 "type": f.get("type") or f.get("data_type") or None,
             })
+    logger.info("[relationships] built manifest fields=%d", len(manifest))
 
     snapshot = {
         "connector_ids": [str(c.connector_id) for c in selected],
@@ -228,7 +236,9 @@ def create_dataset_review(
                         dst[k] = v
 
         # Single-shot call with full input
+        logger.info("[relationships] invoking LLM provider=%s model=%s", provider, model)
         parsed, usage = client.review_schema(prompt=prompt, system=system)
+        logger.info("[relationships] LLM response received; usage=%s", usage)
         accumulate_usage(total_usage, usage or {})
 
         result = parsed if isinstance(parsed, dict) else {}
@@ -238,7 +248,7 @@ def create_dataset_review(
             from datetime import datetime as dt
             result["generated_at"] = dt.utcnow().isoformat() + "Z"
 
-        # Optional repair: ensure manifest coverage
+        # Coverage summary (no repair)
         def build_covered_set(out: dict) -> set:
             covered: set = set()
             for ent in (out.get("entities") or []):
@@ -248,26 +258,11 @@ def create_dataset_review(
                         covered.add(key)
             return covered
 
-        manifest_keys = {(str(i.get("connector_id")), (i.get("entity_name") or "").lower(), (i.get("field_name") or "").lower()) for i in manifest}
         covered_keys = build_covered_set(result)
-        missing = [i for i in manifest if (str(i.get("connector_id")), (i.get("entity_name") or "").lower(), (i.get("field_name") or "").lower()) not in covered_keys]
-
-        enable_repair = os.getenv("REL_ENABLE_REPAIR", "true").lower() == "true"
-        if missing and enable_repair:
-            repair_instr = (
-                "You previously produced a canonical schema, but some input fields are missing. "
-                "Append ONLY the missing fields with correct mappings to the existing output. "
-                "Return the SAME overall JSON shape (entities + relationships)."
-            )
-            repair_prompt = (
-                prompt_intro + "\n" + repair_instr +
-                "\n\nExisting output JSON (use as base, append missing only):\n" + json.dumps(result) +
-                "\n\nMissing manifest items (must be covered):\n" + json.dumps(missing)
-            )
-            repaired, usage2 = client.review_schema(prompt=repair_prompt, system=system)
-            accumulate_usage(total_usage, usage2 or {})
-            if isinstance(repaired, dict):
-                result = repaired
+        total = len(manifest)
+        covered = len(covered_keys)
+        if total > 0:
+            logger.info("[relationships] coverage manifest total=%d covered=%d missing=%d", total, covered, max(total - covered, 0))
 
         review.suggestions = result
         review.status = ReviewStatusEnum.succeeded.value
@@ -275,10 +270,12 @@ def create_dataset_review(
         from datetime import datetime as dt
         review.completed_at = dt.utcnow()
         db.commit()
+        logger.info("[relationships] create_dataset_review completed review_id=%s", str(review.review_id))
     except Exception as e:
         review.status = ReviewStatusEnum.failed.value
         review.error_message = str(e)
         db.commit()
+        logger.exception("[relationships] create_dataset_review failed: %s", e)
         raise HTTPException(status_code=500, detail=f"LLM enrichment failed: {e}")
     return {
         "review_id": str(review.review_id),
