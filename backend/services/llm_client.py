@@ -6,11 +6,19 @@ from __future__ import annotations
 import os
 import time
 import math
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 
 class LLMClient:
     def review_schema(self, prompt: str, system: Optional[str] = None, max_tokens: Optional[int] = None, timeout: Optional[int] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        raise NotImplementedError
+
+    def write_cards(self, prompts: List[Dict[str, str]], timeout: Optional[int] = None) -> List[str]:
+        """
+        Optional convenience for batch prose generation. Each item: {"system": str, "user": str}.
+        Returns card texts aligned with inputs. Default implementation calls review-like JSON mode is not required,
+        concrete providers can override to use normal text responses.
+        """
         raise NotImplementedError
 
 
@@ -136,6 +144,28 @@ class OpenAIClient(LLMClient):
                 sleep_s = self.backoff_base * math.pow(2, attempt)
                 time.sleep(sleep_s)
                 attempt += 1
+
+    def write_cards(self, prompts: List[Dict[str, str]], timeout: Optional[int] = None) -> List[str]:
+        import requests
+        results: List[str] = []
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        for p in prompts:
+            payload = {
+                "model": self.model,
+                "temperature": 0.3,
+                "messages": [
+                    {"role": "system", "content": p.get("system") or "You write concise, fact-based summaries."},
+                    {"role": "user", "content": p.get("user") or ""},
+                ],
+                "max_tokens": int(os.getenv("INDEX_MAX_TEXT_LEN", "1200"))
+            }
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout or self.timeout)
+            resp.raise_for_status()
+            data = resp.json()
+            text = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
+            results.append(text)
+        return results
 
 
 def get_llm_client() -> Tuple[str, str, LLMClient]:

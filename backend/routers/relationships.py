@@ -18,6 +18,7 @@ from models.schema import Schema
 from models.schema_review import DatasetReview, GlobalCanonicalSchema, ReviewStatusEnum
 from services.llm_client import get_llm_client
 from pydantic import BaseModel, UUID4, Field
+from services.indexer import upsert_cards
 
 
 router = APIRouter(prefix="/tenants/{tenant_id}/relationships", tags=["Data Relationships"])
@@ -344,6 +345,37 @@ def save_global_canonical(
         "created_at": canon.created_at.isoformat(),
         "base_schema_ids": canon.base_schema_ids,
     }
+
+
+class BuildIndexBody(BaseModel):
+    canonical_id: Optional[UUID4] = None
+
+
+@router.post("/index/build")
+def build_index(
+    tenant_id: str,
+    body: BuildIndexBody,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    check_auth_and_tenant(credentials, tenant_id)
+    # Fetch canonical: specific or latest
+    if body.canonical_id:
+        canon = db.query(GlobalCanonicalSchema).filter_by(tenant_id=tenant_id, global_canonical_id=str(body.canonical_id)).first()
+        if not canon:
+            raise HTTPException(status_code=404, detail="Canonical not found")
+    else:
+        canon = db.query(GlobalCanonicalSchema).filter_by(tenant_id=tenant_id).order_by(GlobalCanonicalSchema.version.desc()).first()
+        if not canon:
+            raise HTTPException(status_code=404, detail="No canonical available")
+    # Validate required top-level keys
+    cg = canon.canonical_graph or {}
+    for key in ("version", "generated_at", "entities", "relationships"):
+        if key not in cg:
+            raise HTTPException(status_code=400, detail=f"Canonical missing required key: {key}")
+    # Upsert into vector index
+    res = upsert_cards(db, tenant_id, cg)
+    return {"ok": True, "counts": res}
 
 
 @router.get("/canonical/latest")

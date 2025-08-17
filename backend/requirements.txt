@@ -28,3 +28,4 @@ langchain-core==0.3.72
 langchain-openai==0.2.7
 langchain-anthropic==0.3.18
 langchain>=0.3.22,<0.4.0
+pgvector==0.2.5
