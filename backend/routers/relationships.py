@@ -116,14 +116,33 @@ def create_dataset_review(
                 "fields": e.get("fields", []),
             })
 
+    # Build coverage manifest to guarantee we don't drop any fields
+    manifest: list[dict] = []
+    for item in input_entities:
+        cid = item.get("connector_id")
+        eid = item.get("entity_id")
+        ename = item.get("entity_name")
+        for f in (item.get("fields") or []):
+            manifest.append({
+                "connector_id": cid,
+                "entity_id": eid,
+                "entity_name": ename,
+                "field_name": f.get("name"),
+                "type": f.get("type") or f.get("data_type") or None,
+            })
+
     snapshot = {
         "connector_ids": [str(c.connector_id) for c in selected],
         "connectors": [{"connector_id": str(c.connector_id), "type": c.type} for c in selected],
         "schema_ids": [str(s.schema_id) for s in latest_schemas],
         "input_entities": input_entities,
+        "manifest": manifest,
         "params": options.model_dump(),
     }
-    system = "You are a precise data modeling assistant. Return ONLY valid JSON matching the provided output schema."
+    system = (
+        "You are a precise data modeling assistant. Return ONLY valid JSON matching the provided output schema. "
+        "NON-NEGOTIABLE: Do not omit any input fields; every source field from input must appear as a field in the output under some entity."
+    )
     output_hint = {
         "version": "pilot-1",
         "generated_at": "ISO-8601 UTC timestamp",
@@ -170,12 +189,15 @@ def create_dataset_review(
     prompt_instr = (
         "Return valid JSON ONLY matching this exact output format: " + json.dumps(output_hint) +
         "\nRequirements: (1) Include top-level 'version' with value 'pilot-1' and 'generated_at' as ISO-8601 UTC." \
-        + " (2) Cover ALL input entities across ALL connectors." \
+        + " (2) ** NON NEGOTIABLE ** Cover ALL input entities and their fields across ALL connectors." \
         + " (3) For each entity, include 'tags' as relevant keywords." \
         + " (4) For each field, include 'description' and 'confidence' (0..1), and per-source mappings (connector_id, source_entity, source_field, confidence)." \
         + " (5) Provide a confidence (0..1) for each relationship."
     )
-    prompt_data = "Input entities JSON array:\n" + json.dumps(snapshot["input_entities"])  # compact to reduce length
+    prompt_data = (
+        "Input entities JSON array:\n" + json.dumps(snapshot["input_entities"]) +
+        "\n\nCoverage manifest (every item must be represented by at least one output field mapping):\n" + json.dumps(snapshot["manifest"])  # compact to reduce length
+    )
     prompt = prompt_intro + "\n" + prompt_instr + "\n\n" + prompt_data
 
     review = DatasetReview(
@@ -189,10 +211,6 @@ def create_dataset_review(
     db.add(review)
     db.flush()
     try:
-        # Chunking to avoid timeouts and token overflows
-        max_per_call = int(os.getenv("DATASET_REVIEW_MAX_ENTITIES_PER_CALL", "150"))
-        chunks = [input_entities[i:i+max_per_call] for i in range(0, len(input_entities), max_per_call)]
-        merged = {"version": "pilot-1", "generated_at": None, "entities": [], "relationships": []}
         total_usage: dict = {}
 
         def accumulate_usage(dst: dict, src: dict):
@@ -206,90 +224,52 @@ def create_dataset_review(
                         dst[k] = {}
                     accumulate_usage(dst[k], v)
                 else:
-                    # For non-numeric scalars or lists, keep the first value if not present
                     if k not in dst:
                         dst[k] = v
-        for idx, chunk in enumerate(chunks):
-            chunk_snapshot = {**snapshot, "input_entities": chunk}
-            chunk_prompt = prompt_intro + "\n" + prompt_instr + "\n\n" + ("Input entities JSON array:\n" + json.dumps(chunk))
-            parsed, usage = client.review_schema(prompt=chunk_prompt, system=system)
-            # Merge results (pilot format)
-            ents = parsed.get("entities") or []
-            rels = parsed.get("relationships") or []
-            # Keep first generated_at if provided
-            if not merged.get("generated_at"):
-                ga = parsed.get("generated_at")
-                if isinstance(ga, str) and ga:
-                    merged["generated_at"] = ga
-            # Deduplicate entities by name (case-insensitive)
-            existing_names = { (e.get("name") or "").lower(): i for i, e in enumerate(merged["entities"]) }
-            for e in ents:
-                key = (e.get("name") or "").lower()
-                if key in existing_names:
-                    tgt = merged["entities"][existing_names[key]]
-                    # Merge fields by name, and merge per-field mappings
-                    def merge_fields(a, b):
-                        index = { (f.get("name") or "").lower(): f for f in a }
-                        for f in b:
-                            fk = (f.get("name") or "").lower()
-                            if fk in index:
-                                tf = index[fk]
-                                tmap = tf.get("mappings") or []
-                                mmap = f.get("mappings") or []
-                                seen_map = { (m.get("connector_id"), (m.get("source_entity") or "").lower(), (m.get("source_field") or "").lower()) for m in tmap }
-                                for m in mmap:
-                                    sig = (m.get("connector_id"), (m.get("source_entity") or "").lower(), (m.get("source_field") or "").lower())
-                                    if sig not in seen_map:
-                                        tmap.append(m)
-                                if tmap:
-                                    tf["mappings"] = tmap
-                                # Merge field description and confidence
-                                if not (str(tf.get("description") or "").strip()) and str(f.get("description") or "").strip():
-                                    tf["description"] = f.get("description")
-                                try:
-                                    tfc = float(tf.get("confidence")) if tf.get("confidence") is not None else None
-                                except Exception:
-                                    tfc = None
-                                try:
-                                    fc = float(f.get("confidence")) if f.get("confidence") is not None else None
-                                except Exception:
-                                    fc = None
-                                if fc is not None and (tfc is None or fc > tfc):
-                                    tf["confidence"] = fc
-                            else:
-                                a.append(f)
-                        return a
-                    tgt["fields"] = merge_fields(tgt.get("fields", []), e.get("fields", []))
-                    # Keep first non-empty description
-                    tgt_desc = (tgt.get("description") or "").strip()
-                    e_desc = (e.get("description") or "").strip()
-                    if not tgt_desc and e_desc:
-                        tgt["description"] = e.get("description")
-                    # Union tags
-                    tgt_tags = set((tgt.get("tags") or []))
-                    new_tags = [t for t in (e.get("tags") or []) if isinstance(t, str) and t.strip()]
-                    if new_tags:
-                        tgt["tags"] = sorted(list(tgt_tags.union(new_tags)))
-                else:
-                    merged["entities"].append(e)
-                    existing_names[key] = len(merged["entities"]) - 1
-            # Merge relationships by composite key
-            def rel_key(rel: dict):
-                jt = tuple(sorted([ (p.get("from_field"), p.get("to_field")) for p in (rel.get("join_on") or []) ]))
-                return (rel.get("from_entity"), rel.get("to_entity"), rel.get("type"), jt)
-            seen_rel = { rel_key(r) for r in merged["relationships"] }
-            for r in rels:
-                k = rel_key(r)
-                if k not in seen_rel:
-                    merged["relationships"].append(r)
-            # Accumulate usage
-            accumulate_usage(total_usage, usage or {})
 
-        # Ensure generated_at is set
-        if not merged.get("generated_at"):
+        # Single-shot call with full input
+        parsed, usage = client.review_schema(prompt=prompt, system=system)
+        accumulate_usage(total_usage, usage or {})
+
+        result = parsed if isinstance(parsed, dict) else {}
+        if "version" not in result:
+            result["version"] = "pilot-1"
+        if "generated_at" not in result or not result.get("generated_at"):
             from datetime import datetime as dt
-            merged["generated_at"] = dt.utcnow().isoformat() + "Z"
-        review.suggestions = merged
+            result["generated_at"] = dt.utcnow().isoformat() + "Z"
+
+        # Optional repair: ensure manifest coverage
+        def build_covered_set(out: dict) -> set:
+            covered: set = set()
+            for ent in (out.get("entities") or []):
+                for fld in (ent.get("fields") or []):
+                    for m in (fld.get("mappings") or []):
+                        key = (str(m.get("connector_id")), (m.get("source_entity") or "").lower(), (m.get("source_field") or "").lower())
+                        covered.add(key)
+            return covered
+
+        manifest_keys = {(str(i.get("connector_id")), (i.get("entity_name") or "").lower(), (i.get("field_name") or "").lower()) for i in manifest}
+        covered_keys = build_covered_set(result)
+        missing = [i for i in manifest if (str(i.get("connector_id")), (i.get("entity_name") or "").lower(), (i.get("field_name") or "").lower()) not in covered_keys]
+
+        enable_repair = os.getenv("REL_ENABLE_REPAIR", "true").lower() == "true"
+        if missing and enable_repair:
+            repair_instr = (
+                "You previously produced a canonical schema, but some input fields are missing. "
+                "Append ONLY the missing fields with correct mappings to the existing output. "
+                "Return the SAME overall JSON shape (entities + relationships)."
+            )
+            repair_prompt = (
+                prompt_intro + "\n" + repair_instr +
+                "\n\nExisting output JSON (use as base, append missing only):\n" + json.dumps(result) +
+                "\n\nMissing manifest items (must be covered):\n" + json.dumps(missing)
+            )
+            repaired, usage2 = client.review_schema(prompt=repair_prompt, system=system)
+            accumulate_usage(total_usage, usage2 or {})
+            if isinstance(repaired, dict):
+                result = repaired
+
+        review.suggestions = result
         review.status = ReviewStatusEnum.succeeded.value
         review.token_usage = total_usage
         from datetime import datetime as dt
