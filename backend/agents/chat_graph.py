@@ -43,13 +43,13 @@ def _make_llm():
         pass
     if provider == "openai":
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=model, temperature=temperature, streaming=True)
+        return ChatOpenAI(model=model, temperature=temperature, streaming=True, api_key=os.getenv("LLM_API_KEY"))
     elif provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=model, temperature=temperature, streaming=True)
+        return ChatAnthropic(model=model, temperature=temperature, streaming=True, api_key=os.getenv("LLM_API_KEY"))
     else:
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=model, temperature=temperature, streaming=True)
+        return ChatOpenAI(model=model, temperature=temperature, streaming=True, api_key=os.getenv("LLM_API_KEY"))
 
 def _build_connectors_summary(connectors: List[Connector]) -> List[Dict[str, Any]]:
     return [{"connector_id": str(c.connector_id), "connector_type": c.type} for c in connectors]
