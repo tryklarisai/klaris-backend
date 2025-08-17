@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 import os
+import json
 import hashlib
 from datetime import datetime
 from sqlalchemy import text
@@ -153,13 +154,16 @@ def upsert_cards(db: Session, tenant_id: str, canonical: Dict[str, Any]) -> Dict
     now_iso = datetime.utcnow().isoformat()
     rows = []
     for idx, (t, m, k) in enumerate(entity_cards + field_cards + rel_cards):
+        # Prepare JSON and vector literals to avoid driver adaptation issues
+        metadata_json = json.dumps(m)
+        embedding_vec = "[" + ",".join(str(float(x)) for x in (embeddings[idx] or [])) + "]"
         rows.append({
             "tenant_id": tenant_id,
             "key_kind": m.get("card_kind"),
             "key_hash": k,
             "card_text": t,
-            "metadata": m,
-            "embedding": embeddings[idx],
+            "metadata_json": metadata_json,
+            "embedding_vec": embedding_vec,
             "created_at": now_iso,
             "updated_at": now_iso,
         })
@@ -170,7 +174,7 @@ def upsert_cards(db: Session, tenant_id: str, canonical: Dict[str, Any]) -> Dict
         stmt = text(
             """
             INSERT INTO vector_cards (card_id, tenant_id, key_kind, key_hash, card_text, metadata, embedding, created_at, updated_at)
-            VALUES (gen_random_uuid(), :tenant_id, :key_kind, :key_hash, :card_text, CAST(:metadata AS JSONB), :embedding, :created_at, :updated_at)
+            VALUES (gen_random_uuid(), :tenant_id, :key_kind, :key_hash, :card_text, CAST(:metadata_json AS JSONB), :embedding_vec::vector, :created_at, :updated_at)
             ON CONFLICT (tenant_id, key_kind, key_hash)
             DO UPDATE SET card_text = EXCLUDED.card_text, metadata = EXCLUDED.metadata, embedding = EXCLUDED.embedding, updated_at = EXCLUDED.updated_at
             """
