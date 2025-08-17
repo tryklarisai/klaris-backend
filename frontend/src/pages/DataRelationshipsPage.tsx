@@ -31,6 +31,17 @@ export default function DataRelationshipsPage() {
   const [validateErrors, setValidateErrors] = React.useState<{ path: string; message: string }[] | null>(null);
   const [savedBaseSchemaIds, setSavedBaseSchemaIds] = React.useState<string[] | null>(null);
 
+  // Indexing/search state
+  const [indexBuildLoading, setIndexBuildLoading] = React.useState(false);
+  const [indexBuildError, setIndexBuildError] = React.useState<string | null>(null);
+  const [indexBuildCounts, setIndexBuildCounts] = React.useState<any | null>(null);
+  const [indexStats, setIndexStats] = React.useState<Record<string, number> | null>(null);
+  const [searchQ, setSearchQ] = React.useState<string>("");
+  const [searchTopK, setSearchTopK] = React.useState<number>(10);
+  const [searchLoading, setSearchLoading] = React.useState(false);
+  const [searchError, setSearchError] = React.useState<string | null>(null);
+  const [searchResults, setSearchResults] = React.useState<any[] | null>(null);
+
   React.useEffect(() => {
     const tStr = window.localStorage.getItem('klaris_tenant');
     if (!tStr) return;
@@ -125,6 +136,60 @@ export default function DataRelationshipsPage() {
       setCanonicalMessage(e.message || 'Failed to save');
     } finally {
       setCanonicalSaving(false);
+    }
+  };
+
+  const buildIndex = async () => {
+    if (!tenantId) return;
+    setIndexBuildLoading(true); setIndexBuildError(null); setIndexBuildCounts(null);
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      const resp = await fetch(`${API_URL}/tenants/${tenantId}/relationships/index/build`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      const result = await resp.json();
+      if (!resp.ok) throw new Error(result?.detail || 'Index build failed');
+      setIndexBuildCounts(result?.counts || null);
+      // refresh stats after build
+      try { await refreshIndexStats(); } catch {}
+    } catch (e: any) {
+      setIndexBuildError(e.message || 'Index build failed');
+    } finally {
+      setIndexBuildLoading(false);
+    }
+  };
+
+  const refreshIndexStats = async () => {
+    if (!tenantId) return;
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      const resp = await fetch(`${API_URL}/tenants/${tenantId}/relationships/index/stats`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!resp.ok) return;
+      const result = await resp.json();
+      setIndexStats(result?.counts || null);
+    } catch {}
+  };
+
+  const doSearch = async () => {
+    if (!tenantId || !searchQ.trim()) return;
+    setSearchLoading(true); setSearchError(null); setSearchResults(null);
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      const params = new URLSearchParams({ q: searchQ, top_k: String(searchTopK || 10) });
+      const resp = await fetch(`${API_URL}/tenants/${tenantId}/relationships/index/search?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const result = await resp.json();
+      if (!resp.ok) throw new Error(result?.detail || 'Search failed');
+      setSearchResults(result?.results || []);
+    } catch (e: any) {
+      setSearchError(e.message || 'Search failed');
+    } finally {
+      setSearchLoading(false);
     }
   };
 
@@ -550,7 +615,16 @@ export default function DataRelationshipsPage() {
                     <Button variant="outlined" onClick={saveGlobalCanonical} disabled={canonicalSaving}>
                       {canonicalSaving ? 'Saving…' : 'Publish Global Canonical'}
                     </Button>
+                    <Button variant="outlined" onClick={buildIndex} disabled={indexBuildLoading}>
+                      {indexBuildLoading ? 'Building Index…' : 'Build Index'}
+                    </Button>
                   </Stack>
+                  {indexBuildError && <Alert severity="error" sx={{ mt: 1 }}>{indexBuildError}</Alert>}
+                  {indexBuildCounts && (
+                    <Alert severity="success" sx={{ mt: 1 }}>
+                      Indexed entities: {indexBuildCounts.entities || 0}, fields: {indexBuildCounts.fields || 0}, relationships: {indexBuildCounts.relationships || 0}, total: {indexBuildCounts.total || 0}
+                    </Alert>
+                  )}
                   {canonicalMessage && (
                     <Alert severity={canonicalMessage.includes('saved') ? 'success' : 'error'} sx={{ mt: 1 }}>{canonicalMessage}</Alert>
                   )}
@@ -563,13 +637,64 @@ export default function DataRelationshipsPage() {
                   <RelationshipsTable rels={savedCanonical?.relationships || []} />
                   <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
                     <Button variant="contained" onClick={beginEdit}>Edit Canonical</Button>
+                    <Button variant="outlined" onClick={buildIndex} disabled={indexBuildLoading}>
+                      {indexBuildLoading ? 'Building Index…' : 'Build Index'}
+                    </Button>
                   </Stack>
+                  {indexBuildError && <Alert severity="error" sx={{ mt: 1 }}>{indexBuildError}</Alert>}
+                  {indexBuildCounts && (
+                    <Alert severity="success" sx={{ mt: 1 }}>
+                      Indexed entities: {indexBuildCounts.entities || 0}, fields: {indexBuildCounts.fields || 0}, relationships: {indexBuildCounts.relationships || 0}, total: {indexBuildCounts.total || 0}
+                    </Alert>
+                  )}
                   {canonicalMessage && (
                     <Alert severity={canonicalMessage.includes('saved') ? 'success' : 'error'} sx={{ mt: 1 }}>{canonicalMessage}</Alert>
                   )}
                 </>
               ) : (
                 <Typography variant="body2" color="text.secondary">Run Enrich to see results.</Typography>
+              )}
+            </AccordionDetails>
+          </Accordion>
+
+          <Accordion>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>Search Index</AccordionSummary>
+            <AccordionDetails>
+              <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
+                <TextField size="small" placeholder="Search query" value={searchQ} onChange={(e) => setSearchQ(e.target.value)} sx={{ minWidth: 360 }} />
+                <TextField size="small" type="number" label="Top K" value={searchTopK} onChange={(e) => setSearchTopK(Math.max(1, Number(e.target.value || 10)))} sx={{ width: 120 }} />
+                <Button variant="contained" onClick={doSearch} disabled={searchLoading || !searchQ.trim()}>
+                  {searchLoading ? 'Searching…' : 'Search'}
+                </Button>
+                <Button variant="text" onClick={refreshIndexStats}>Refresh Stats</Button>
+                {indexStats && (
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ ml: 1 }}>
+                    <Chip label={`entity: ${indexStats.entity || 0}`} size="small" />
+                    <Chip label={`field: ${indexStats.field || 0}`} size="small" />
+                    <Chip label={`relationship: ${indexStats.relationship || 0}`} size="small" />
+                  </Stack>
+                )}
+              </Stack>
+              {searchError && <Alert severity="error" sx={{ mb: 1 }}>{searchError}</Alert>}
+              {Array.isArray(searchResults) && searchResults.length > 0 && (
+                <Box sx={{ display: 'grid', gridTemplateColumns: '1fr', gap: 1 }}>
+                  {searchResults.map((r: any, idx: number) => (
+                    <Paper key={idx} variant="outlined" sx={{ p: 1.5 }}>
+                      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 0.5 }}>
+                        <Chip label={r.key_kind} size="small" />
+                        <Typography variant="caption" color="text.secondary">score: {typeof r.score === 'number' ? r.score.toFixed(3) : ''}</Typography>
+                      </Stack>
+                      <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>{String(r.card_text || '').slice(0, 400)}</Typography>
+                      <Box sx={{ mt: 1, borderTop: '1px dashed', borderColor: 'divider', pt: 1 }}>
+                        <Typography variant="caption" color="text.secondary">metadata preview:</Typography>
+                        <JsonView src={r.metadata || {}} theme="github" collapsed={2} enableClipboard />
+                      </Box>
+                    </Paper>
+                  ))}
+                </Box>
+              )}
+              {Array.isArray(searchResults) && searchResults.length === 0 && (
+                <Typography variant="body2" color="text.secondary">No results.</Typography>
               )}
             </AccordionDetails>
           </Accordion>
