@@ -59,9 +59,9 @@ class AnthropicClient(LLMClient):
 class OpenAIClient(LLMClient):
     def __init__(self) -> None:
         self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        self.api_key = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
+        self.api_key = os.getenv("LLM_API_KEY")
         if not self.api_key:
-            raise RuntimeError("Missing LLM_API_KEY/OPENAI_API_KEY for OpenAI provider")
+            raise RuntimeError("Missing LLM_API_KEY for OpenAI provider")
         self.model = os.getenv("LLM_MODEL", "gpt-4o")
         # Increase default timeout to better handle larger ontology jobs
         self.timeout = int(os.getenv("LLM_TIMEOUT_SECONDS", "90"))
