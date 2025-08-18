@@ -18,7 +18,9 @@ from models.schema import Schema
 from models.schema_review import DatasetReview, GlobalCanonicalSchema, ReviewStatusEnum
 from services.llm_client import get_llm_client
 from pydantic import BaseModel, UUID4, Field
-from sqlalchemy import text as sql_text
+from sqlalchemy import text as sql_text, select, Table, Column, String as SAString, Text as SAText, DateTime as SADateTime, MetaData
+from sqlalchemy.dialects.postgresql import UUID as PGUUID, JSONB
+from pgvector.sqlalchemy import Vector
 from services.indexer import upsert_cards
 
 
@@ -50,6 +52,83 @@ class CreateDatasetReviewRequest(BaseModel):
     connector_ids: List[UUID4]
     options: Optional[CreateDatasetReviewOptions] = None
 
+from collections import defaultdict
+import copy
+import re
+
+def anchor_and_split_cross_entity_fields(result: dict) -> dict:
+    """
+    Ensure each source_entity's fields live in its anchored canonical entity.
+    If a canonical field mixes mappings from multiple source entities, split it
+    so that each source_entity's mappings move to that source's anchor entity.
+    """
+    entities = result.get("entities") or []
+    if not entities:
+        return result
+
+    # Count mappings from each source_entity under each canonical entity
+    src_counts = defaultdict(lambda: defaultdict(int))  # source_entity -> {canonical_entity_name: count}
+    for e in entities:
+        e_name = (e.get("name") or "").strip()
+        for f in (e.get("fields") or []):
+            for m in (f.get("mappings") or []):
+                src_counts[m.get("source_entity", "")][e_name] += 1
+
+    # Pick anchor entity for each source_entity (argmax count)
+    src_anchor = {}
+    for src, counts in src_counts.items():
+        if counts:
+            anchor_ent = max(counts.items(), key=lambda kv: kv[1])[0]
+            src_anchor[src] = anchor_ent
+
+    ent_by_name = {(e.get("name") or "").strip(): e for e in entities}
+
+    def get_or_create_field(target_entity: dict, field_name: str, template_field: dict) -> dict:
+        for f in (target_entity.get("fields") or []):
+            if (f.get("name") or "").strip().lower() == (field_name or "").strip().lower():
+                return f
+        nf = {
+            "name": field_name,
+            "description": template_field.get("description", ""),
+            "semantic_type": template_field.get("semantic_type", "identifier" if (field_name or "").lower().endswith("id") else "unknown"),
+            "pii": template_field.get("pii", "none"),
+            "primary_key": bool(template_field.get("primary_key", False)),
+            "is_join_key": bool(template_field.get("is_join_key", False)),
+            "nullable": bool(template_field.get("nullable", True)),
+            "mappings": []
+        }
+        target_entity.setdefault("fields", []).append(nf)
+        return nf
+
+    for e in list(entities):
+        e_name = (e.get("name") or "").strip()
+        new_fields = []
+        for f in (e.get("fields") or []):
+            maps = f.get("mappings") or []
+            by_src = defaultdict(list)
+            for m in maps:
+                by_src[m.get("source_entity", "")].append(m)
+
+            stay = []
+            for src, src_maps in by_src.items():
+                anchor_name = src_anchor.get(src)
+                if not anchor_name or anchor_name == e_name:
+                    stay.extend(src_maps)
+                else:
+                    target_ent = ent_by_name.get(anchor_name)
+                    if not target_ent:
+                        target_ent = {"name": anchor_name, "description": "", "tags": [], "fields": []}
+                        entities.append(target_ent)
+                        ent_by_name[anchor_name] = target_ent
+                    target_field = get_or_create_field(target_ent, f.get("name") or "", f)
+                    target_field.setdefault("mappings", []).extend(copy.deepcopy(src_maps))
+            if stay:
+                f["mappings"] = stay
+                new_fields.append(f)
+        e["fields"] = new_fields
+
+    result["entities"] = [e for e in entities if (e.get("fields") or [])]
+    return result
 
 @router.post("/reviews")
 def create_dataset_review(
@@ -58,9 +137,17 @@ def create_dataset_review(
     db: Session = Depends(get_db),
     credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
 ):
+    """
+    Canonical schema suggestion with 100% field coverage (ID-based) + relationship labeling (2nd pass),
+    and cross-entity anchoring to keep source fields under their correct canonical entity.
+    """
+    from datetime import datetime as dt
+    import json, os  # <-- added os
+
     ctx = check_auth_and_tenant(credentials, tenant_id)
     logger.info("[relationships] create_dataset_review start tenant_id=%s", tenant_id)
-    # Validate connectors and fetch latest schemas per connector
+
+    # Validate connectors & fetch latest schemas
     if not body.connector_ids:
         raise HTTPException(status_code=400, detail="connector_ids required")
     id_set = {str(cid) for cid in body.connector_ids}
@@ -69,10 +156,14 @@ def create_dataset_review(
     if not selected:
         raise HTTPException(status_code=400, detail="No active connectors selected")
     logger.info("[relationships] selected_connectors=%d", len(selected))
+
     latest_schemas: List[Schema] = []
     connector_by_id = {str(c.connector_id): c for c in selected}
     for c in selected:
-        s = db.query(Schema).filter_by(connector_id=c.connector_id, tenant_id=tenant_id).order_by(Schema.fetched_at.desc()).first()
+        s = (db.query(Schema)
+             .filter_by(connector_id=c.connector_id, tenant_id=tenant_id)
+             .order_by(Schema.fetched_at.desc())
+             .first())
         if s:
             latest_schemas.append(s)
     if not latest_schemas:
@@ -81,14 +172,13 @@ def create_dataset_review(
 
     provider, model, client = get_llm_client()
     options = body.options or CreateDatasetReviewOptions()
-    # Prepare normalized input snapshot (structure-only, entities extracted)
-    import json
+    rel_conf_threshold = float(options.confidence_threshold or 0.6)
+
+    # Helpers
     def extract_entities(raw: dict) -> list:
-        # raw is typically {"schema": mcp_schema, "fetched_at": ...} or just mcp_schema
         root = raw.get("schema", raw) if isinstance(raw, dict) else {}
         if isinstance(root, dict) and isinstance(root.get("entities"), list):
             return root["entities"]
-        # Fallbacks for legacy shapes
         entities = []
         if isinstance(root.get("tables"), list):
             for t in root["tables"]:
@@ -108,6 +198,22 @@ def create_dataset_review(
                 })
         return entities
 
+    def norm(s: str) -> str:
+        s = (s or "").strip()
+        s = s.replace("-", "_")
+        s = re.sub(r"[^A-Za-z0-9_]+", " ", s)
+        s = re.sub(r"\s+", " ", s).lower()
+        return s
+
+    def toks(s: str) -> list[str]:
+        return [t for t in norm(s).replace("_", " ").split() if t]
+
+    def jaccard(a: set, b: set) -> float:
+        if not a and not b:
+            return 0.0
+        return len(a & b) / max(1, len(a | b))
+
+    # Build normalized input_entities (audit only)
     input_entities = []
     for s in latest_schemas:
         cid = str(s.connector_id)
@@ -125,35 +231,46 @@ def create_dataset_review(
             })
     logger.info("[relationships] built input_entities count=%d", len(input_entities))
 
-    # Build coverage manifest to guarantee we don't drop any fields
-    manifest: list[dict] = []
+    # MANIFEST with mapping IDs (mids)
+    manifest: List[dict] = []
+    mid_lookup: dict[int, dict] = {}
+    mid = 0
     for item in input_entities:
-        cid = item.get("connector_id")
-        eid = item.get("entity_id")
-        ename = item.get("entity_name")
+        cid = item["connector_id"]
+        ename = item["entity_name"]
         for f in (item.get("fields") or []):
-            manifest.append({
+            entry = {
+                "mid": mid,
                 "connector_id": cid,
-                "entity_id": eid,
-                "entity_name": ename,
-                "field_name": f.get("name"),
+                "source_entity": ename,
+                "source_field": f.get("name"),
                 "type": f.get("type") or f.get("data_type") or None,
-            })
-    logger.info("[relationships] built manifest fields=%d", len(manifest))
+            }
+            manifest.append(entry)
+            mid_lookup[mid] = entry
+            mid += 1
+
+    total_manifest = len(manifest)
+    if total_manifest == 0:
+        raise HTTPException(status_code=400, detail="No fields found in selected connectors' schemas")
+    logger.info("[relationships] manifest fields=%d", total_manifest)
 
     snapshot = {
         "connector_ids": [str(c.connector_id) for c in selected],
         "connectors": [{"connector_id": str(c.connector_id), "type": c.type} for c in selected],
         "schema_ids": [str(s.schema_id) for s in latest_schemas],
-        "input_entities": input_entities,
+        "input_entities": input_entities[:200],
         "manifest": manifest,
         "params": options.model_dump(),
     }
-    system = (
-        "You are a precise data modeling assistant. Return ONLY valid JSON matching the provided output schema. "
-        "NON-NEGOTIABLE: Do not omit any input fields; every source field from input must appear as a field in the output under some entity."
-    )
-    output_hint = {
+
+    def manifest_lines(items: List[dict]) -> str:
+        return "\n".join(
+            f"{m['connector_id']}|{m['source_entity']}|{m['source_field']}|{(m.get('type') or '')}|{m['mid']}"
+            for m in items
+        )
+
+    output_contract = {
         "version": "pilot-1",
         "generated_at": "ISO-8601 UTC timestamp",
         "entities": [
@@ -165,50 +282,34 @@ def create_dataset_review(
                     {
                         "name": "string",
                         "description": "string",
-                        "data_type": "string",
                         "semantic_type": "string",
-                        "nullable": True,
+                        "pii": "none|low|medium|high",
                         "primary_key": False,
                         "is_join_key": False,
-                        "pii": "none|low|medium|high",
-                        "masking": "string",
-                        "confidence": 0.0,
-                        "mappings": [
-                            {"connector_id": "uuid", "source_entity": "string", "source_field": "string", "confidence": 0.0}
-                        ]
+                        "nullable": True,
+                        "mapping_ids": [0]
                     }
                 ]
             }
         ],
-        "relationships": [
-            {
-                "type": "one_to_one|one_to_many|many_to_one|many_to_many|unknown",
-                "from_entity": "string",
-                "to_entity": "string",
-                "join_on": [ { "from_field": "string", "to_field": "string" } ],
-                "confidence": 0.0
-            }
-        ]
+        "relationships": []
     }
-    # Build prompt in parts to avoid accidental truncation/escaping issues
-    prompt_intro = (
-        "You are given multiple connector schemas (structure only). Build a simplified, connector-agnostic global canonical schema with: "
-        "(a) entities (with fields, basic types, semantic types, nullability, primary keys, join keys, and PII), and "
-        "(b) relationships (with type and join key pairs)."
+
+    system = (
+        "You cluster source fields into canonical entities/fields.\n"
+        "Return ONLY valid JSON matching the provided schema. Do not invent facts.\n"
+        "Use mapping_ids to reference the MANIFEST lines; never omit an ID on purpose."
     )
-    prompt_instr = (
-        "Return valid JSON ONLY matching this exact output format: " + json.dumps(output_hint) +
-        "\nRequirements: (1) Include top-level 'version' with value 'pilot-1' and 'generated_at' as ISO-8601 UTC." \
-        + " (2) ** NON NEGOTIABLE ** Cover ALL input entities and their fields across ALL connectors." \
-        + " (3) For each entity, include 'tags' as relevant keywords." \
-        + " (4) For each field, include 'description' and 'confidence' (0..1), and per-source mappings (connector_id, source_entity, source_field, confidence)." \
-        + " (5) Provide a confidence (0..1) for each relationship."
+
+    prompt = (
+        "You will receive a MANIFEST of source fields.\n"
+        "Group them into canonical ENTITIES and FIELDS.\n"
+        "For each canonical field, provide: name, description, semantic_type, pii, key flags, nullable, "
+        "and the list of mapping_ids that belong to it.\n\n"
+        "OUTPUT JSON SCHEMA:\n" + json.dumps(output_contract) +
+        "\n\nMANIFEST (one per line; format is connector_id|source_entity|source_field|type|mid):\n" +
+        manifest_lines(manifest)
     )
-    prompt_data = (
-        "Input entities JSON array:\n" + json.dumps(snapshot["input_entities"]) +
-        "\n\nCoverage manifest (every item must be represented by at least one output field mapping):\n" + json.dumps(snapshot["manifest"])  # compact to reduce length
-    )
-    prompt = prompt_intro + "\n" + prompt_instr + "\n\n" + prompt_data
 
     review = DatasetReview(
         tenant_id=tenant_id,
@@ -220,6 +321,8 @@ def create_dataset_review(
     )
     db.add(review)
     db.flush()
+
+    # LLM pass #1 (entities & fields)
     try:
         total_usage: dict = {}
 
@@ -237,48 +340,279 @@ def create_dataset_review(
                     if k not in dst:
                         dst[k] = v
 
-        # Single-shot call with full input
-        logger.info("[relationships] invoking LLM provider=%s model=%s", provider, model)
-        parsed, usage = client.review_schema(prompt=prompt, system=system)
-        logger.info("[relationships] LLM response received; usage=%s", usage)
+        logger.info("[relationships] invoking LLM#1 provider=%s model=%s lines=%d", provider, model, total_manifest)
+        parsed, usage = client.review_schema(
+            prompt=prompt,
+            system=system,
+            temperature=0,
+            max_tokens=8000
+        )
         accumulate_usage(total_usage, usage or {})
+        logger.info("[relationships] LLM#1 response received; usage=%s", usage)
 
         result = parsed if isinstance(parsed, dict) else {}
         if "version" not in result:
             result["version"] = "pilot-1"
-        if "generated_at" not in result or not result.get("generated_at"):
-            from datetime import datetime as dt
+        if not result.get("generated_at"):
             result["generated_at"] = dt.utcnow().isoformat() + "Z"
+        result.setdefault("entities", [])
+        result.setdefault("relationships", [])
 
-        # Coverage summary (no repair)
-        def build_covered_set(out: dict) -> set:
-            covered: set = set()
-            for ent in (out.get("entities") or []):
-                for fld in (ent.get("fields") or []):
-                    for m in (fld.get("mappings") or []):
-                        key = (str(m.get("connector_id")), (m.get("source_entity") or "").lower(), (m.get("source_field") or "").lower())
-                        covered.add(key)
-            return covered
+        # Expand mapping_ids -> mappings
+        covered_ids: set[int] = set()
+        for e in result.get("entities", []):
+            for f in (e.get("fields") or []):
+                ids = f.pop("mapping_ids", []) or []
+                maps = []
+                for mid_val in ids:
+                    try:
+                        mid_int = int(mid_val)
+                    except Exception:
+                        continue
+                    t = mid_lookup.get(mid_int)
+                    if t:
+                        covered_ids.add(mid_int)
+                        maps.append({
+                            "connector_id": t["connector_id"],
+                            "source_entity": t["source_entity"],
+                            "source_field": t["source_field"],
+                            "confidence": 1.0
+                        })
+                f["mappings"] = maps
 
-        covered_keys = build_covered_set(result)
-        total = len(manifest)
-        covered = len(covered_keys)
-        if total > 0:
-            logger.info("[relationships] coverage manifest total=%d covered=%d missing=%d", total, covered, max(total - covered, 0))
+        # Auto-attach any missing IDs to an Unassigned entity
+        missing_ids_initial = [m for m in mid_lookup.keys() if m not in covered_ids]
+        if missing_ids_initial:
+            by_src = defaultdict(list)
+            for m in missing_ids_initial:
+                by_src[mid_lookup[m]["source_entity"]].append(m)
+            fallback_fields = []
+            for src, mids in by_src.items():
+                fallback_fields.append({
+                    "name": f"{src} (raw)",
+                    "description": f"Raw fields from {src} pending curation.",
+                    "semantic_type": "unknown",
+                    "pii": "none",
+                    "primary_key": False,
+                    "is_join_key": False,
+                    "nullable": True,
+                    "mappings": [
+                        {
+                            "connector_id": mid_lookup[m]["connector_id"],
+                            "source_entity": mid_lookup[m]["source_entity"],
+                            "source_field": mid_lookup[m]["source_field"],
+                            "confidence": 0.5
+                        }
+                        for m in mids
+                    ]
+                })
+            result["entities"].append({
+                "name": "Unassigned",
+                "description": "Source fields not confidently clustered yet.",
+                "tags": ["unassigned"],
+                "fields": fallback_fields
+            })
 
+        # Anchor & split cross-entity fields (fixes misplaced fields like 'Order ID')
+        before_counts = sum(len(f.get("mappings") or []) for e in result.get("entities", []) for f in (e.get("fields") or []))
+        result = anchor_and_split_cross_entity_fields(result)
+        after_counts = sum(len(f.get("mappings") or []) for e in result.get("entities", []) for f in (e.get("fields") or []))
+        logger.info("[relationships] anchoring split applied; mapping rows before=%d after=%d", before_counts, after_counts)
+
+        # ------- Coverage log (robust) -------
+        # Build reverse map: (connector_id, source_entity, source_field) -> mid
+        def _k(cid, se, sf):
+            return (str(cid).strip().lower(), (se or "").strip().lower(), (sf or "").strip().lower())
+        reverse_mid = { _k(v["connector_id"], v["source_entity"], v["source_field"]): mid for mid, v in mid_lookup.items() }
+
+        covered_ids_after: set[int] = set()
+        for e in result.get("entities", []):
+            for f in (e.get("fields") or []):
+                for m in (f.get("mappings") or []):
+                    mid_match = reverse_mid.get(_k(m.get("connector_id"), m.get("source_entity"), m.get("source_field")))
+                    if mid_match is not None:
+                        covered_ids_after.add(mid_match)
+
+        total_manifest_count = len(manifest)
+        covered_after = len(covered_ids_after)
+        missing_after = total_manifest_count - covered_after
+        if missing_after > 0:
+            preview_ids = [mid for mid in mid_lookup.keys() if mid not in covered_ids_after][:10]
+            preview = [mid_lookup[mid] for mid in preview_ids]
+            logger.warning("[relationships] coverage total=%d covered=%d missing=%d (first_missing=%s)",
+                           total_manifest_count, covered_after, missing_after, preview)
+        else:
+            logger.info("[relationships] coverage total=%d covered=%d missing=%d",
+                        total_manifest_count, covered_after, missing_after)
+
+        # -------- Relationships (second pass) --------
+        # Build canonical field index
+        canon_fields = []
+        for e in result.get("entities", []):
+            e_name = (e.get("name") or "").strip()
+            for f in (e.get("fields") or []):
+                canon_fields.append({
+                    "entity": e_name,
+                    "field": (f.get("name") or "").strip(),
+                    "pk": bool(f.get("primary_key")),
+                    "jk": bool(f.get("is_join_key")),
+                    "sem": (f.get("semantic_type") or "").lower(),
+                    "tokens": set(toks(f.get("name") or "")),
+                })
+
+        def is_id_like(cf):
+            fname = cf["field"]
+            return (cf["sem"] in ("identifier", "id", "key") or
+                    bool(re.search(r"(?:^|[_\s])id$", norm(fname))) or
+                    fname.lower().endswith("_id"))
+
+        fields_for_join = [cf for cf in canon_fields if (cf["pk"] or cf["jk"] or is_id_like(cf))]
+        logger.info("[relationships] candidate fields for join=%d / all=%d", len(fields_for_join), len(canon_fields))
+
+        def score_pair(a, b):
+            if a["entity"] == b["entity"]:
+                return 0.0
+            name_eq = 1.0 if norm(a["field"]) == norm(b["field"]) else 0.0
+            j = jaccard(a["tokens"], b["tokens"])
+            pkjk = 1.0 if (a["pk"] and b["jk"]) or (b["pk"] and a["jk"]) else 0.0
+            both_id = 1.0 if (a["sem"] in ("identifier","id","key") and b["sem"] in ("identifier","id","key")) else 0.0
+            score = 0.75 * max(name_eq, j) + 0.20 * pkjk + 0.05 * both_id
+            return float(score)
+
+        candidates = []
+        pair_id = 0
+        per_pair_bucket: dict[tuple, list] = defaultdict(list)
+        for i in range(len(fields_for_join)):
+            for j in range(i + 1, len(fields_for_join)):
+                a = fields_for_join[i]; b = fields_for_join[j]
+                sc = score_pair(a, b)
+                if sc < 0.7:
+                    continue
+                pred_type = "unknown"
+                f_entity, f_field = a["entity"], a["field"]
+                t_entity, t_field = b["entity"], b["field"]
+                if a["pk"] and b["jk"]:
+                    pred_type = "one_to_many"
+                    f_entity, f_field, t_entity, t_field = a["entity"], a["field"], b["entity"], b["field"]
+                elif b["pk"] and a["jk"]:
+                    pred_type = "one_to_many"
+                    f_entity, f_field, t_entity, t_field = b["entity"], b["field"], a["entity"], a["field"]
+                key = tuple(sorted([a["entity"], b["entity"]]))
+                per_pair_bucket[key].append({
+                    "pair_id": pair_id,
+                    "from_entity": f_entity,
+                    "from_field": f_field,
+                    "to_entity": t_entity,
+                    "to_field": t_field,
+                    "score": sc,
+                    "predicted_type": pred_type,
+                    "hints": {
+                        "a_pk": a["pk"], "a_jk": a["jk"], "b_pk": b["pk"], "b_jk": b["jk"],
+                        "a_sem": a["sem"], "b_sem": b["sem"],
+                    }
+                })
+                pair_id += 1
+
+        MAX_PER_PAIR = int(os.getenv("REL_MAX_PER_ENTITY_PAIR", "5"))
+        MAX_GLOBAL = int(os.getenv("REL_MAX_CANDIDATES", "300"))
+        flat_candidates = []
+        for key, lst in per_pair_bucket.items():
+            lst_sorted = sorted(lst, key=lambda x: x["score"], reverse=True)[:MAX_PER_PAIR]
+            flat_candidates.extend(lst_sorted)
+        flat_candidates = sorted(flat_candidates, key=lambda x: x["score"], reverse=True)[:MAX_GLOBAL]
+        logger.info("[relationships] candidate pairs=%d (after caps)", len(flat_candidates))
+
+        relationships_out = []
+        if flat_candidates:
+            def candidate_lines(items: list[dict]) -> str:
+                lines = []
+                for c in items:
+                    hints_str = json.dumps(c["hints"], separators=(",", ":"))
+                    lines.append(f"{c['pair_id']}|{c['from_entity']}|{c['from_field']}|{c['to_entity']}|{c['to_field']}|{round(c['score'],3)}|{c['predicted_type']}|{hints_str}")
+                return "\n".join(lines)
+
+            rel_output_contract = {
+                "relationships": [
+                    {
+                        "pair_id": 0,
+                        "accept": True,
+                        "type": "one_to_one|one_to_many|many_to_one|many_to_many|unknown",
+                        "confidence": 0.0,
+                        "note": "string"
+                    }
+                ]
+            }
+            rel_system = (
+                "You are a precise data modeling assistant. "
+                "Given candidate join key pairs across canonical entities, "
+                "select only the pairs that are likely true relationships. "
+                "Respond ONLY with JSON matching the schema. "
+                "Use the pair_id to reference candidates; do not invent new pairs."
+            )
+            rel_prompt = (
+                "CANDIDATE PAIRS (one per line; format is "
+                "pair_id|from_entity|from_field|to_entity|to_field|score|predicted_type|hints_json):\n" +
+                candidate_lines(flat_candidates) +
+                "\n\nOUTPUT JSON SCHEMA:\n" + json.dumps(rel_output_contract)
+            )
+
+            logger.info("[relationships] invoking LLM#2 with %d candidates", len(flat_candidates))
+            rel_parsed, rel_usage = client.review_schema(
+                prompt=rel_prompt,
+                system=rel_system,
+                temperature=0,
+                max_tokens=2000
+            )
+            accumulate_usage(total_usage, rel_usage or {})
+            rel_items = (rel_parsed or {}).get("relationships") or []
+
+            cand_by_id = {c["pair_id"]: c for c in flat_candidates}
+            dedup = set()
+            for it in rel_items:
+                try:
+                    if not it.get("accept", False):
+                        continue
+                    pid = int(it.get("pair_id"))
+                    c = cand_by_id.get(pid)
+                    if not c:
+                        continue
+                    rel_type = (it.get("type") or c.get("predicted_type") or "unknown").lower()
+                    conf = float(it.get("confidence") or 0.0)
+                    if conf < rel_conf_threshold:
+                        continue
+                    key = (c["from_entity"].lower(), c["from_field"].lower(),
+                           c["to_entity"].lower(), c["to_field"].lower())
+                    if key in dedup:
+                        continue
+                    dedup.add(key)
+                    relationships_out.append({
+                        "type": rel_type,
+                        "from_entity": c["from_entity"],
+                        "to_entity": c["to_entity"],
+                        "join_on": [{"from_field": c["from_field"], "to_field": c["to_field"]}],
+                        "confidence": conf
+                    })
+                except Exception:
+                    continue
+
+        result["relationships"] = relationships_out
+
+        # Save review
         review.suggestions = result
         review.status = ReviewStatusEnum.succeeded.value
         review.token_usage = total_usage
-        from datetime import datetime as dt
         review.completed_at = dt.utcnow()
         db.commit()
-        logger.info("[relationships] create_dataset_review completed review_id=%s", str(review.review_id))
+        logger.info("[relationships] create_dataset_review completed review_id=%s rels=%d",
+                    str(review.review_id), len(relationships_out))
+
     except Exception as e:
         review.status = ReviewStatusEnum.failed.value
         review.error_message = str(e)
         db.commit()
         logger.exception("[relationships] create_dataset_review failed: %s", e)
         raise HTTPException(status_code=500, detail=f"LLM enrichment failed: {e}")
+
     return {
         "review_id": str(review.review_id),
         "input_snapshot": snapshot,
@@ -405,17 +739,35 @@ def index_search(
     # Embed query
     from services.indexer import _embed_texts  # reuse internal helper
     vec = _embed_texts([q])[0]
-    # Cosine distance search using pgvector operator <#>
-    stmt = sql_text(
-        """
-        SELECT key_kind, key_hash, card_text, metadata, 1 - (embedding <#> :query_vec) AS score
-        FROM vector_cards
-        WHERE tenant_id = :tenant_id
-        ORDER BY embedding <#> :query_vec ASC
-        LIMIT :top_k
-        """
+    # Cosine distance search using SQLAlchemy Core with pgvector Vector type
+    md = MetaData()
+    vector_cards = Table(
+        'vector_cards', md,
+        Column('card_id', PGUUID(as_uuid=True), primary_key=True),
+        Column('tenant_id', PGUUID(as_uuid=True), nullable=False),
+        Column('key_kind', SAString(length=32), nullable=False),
+        Column('key_hash', SAString(length=128), nullable=False),
+        Column('card_text', SAText(), nullable=False),
+        Column('metadata', JSONB, nullable=False),
+        Column('embedding', Vector(), nullable=False),
+        Column('created_at', SADateTime(), nullable=False),
+        Column('updated_at', SADateTime(), nullable=False),
     )
-    rows = db.execute(stmt, {"tenant_id": tenant_id, "query_vec": vec, "top_k": top_k}).mappings().all()
+    # distance expression
+    dist = vector_cards.c.embedding.cosine_distance(vec)
+    stmt = (
+        select(
+            vector_cards.c.key_kind,
+            vector_cards.c.key_hash,
+            vector_cards.c.card_text,
+            vector_cards.c.metadata,
+            (1 - dist).label('score')
+        )
+        .where(vector_cards.c.tenant_id == tenant_id)
+        .order_by(dist)
+        .limit(int(max(1, min(100, top_k))))
+    )
+    rows = db.execute(stmt).mappings().all()
     return {"results": [
         {"key_kind": r["key_kind"], "card_text": r["card_text"], "metadata": r["metadata"], "score": float(r["score"]) }
         for r in rows

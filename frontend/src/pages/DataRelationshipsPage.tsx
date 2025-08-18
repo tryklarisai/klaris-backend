@@ -17,7 +17,6 @@ export default function DataRelationshipsPage() {
   const [selectedConnectorIds, setSelectedConnectorIds] = React.useState<string[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
-  const [schemaModal, setSchemaModal] = React.useState<{ open: boolean; entities?: any[] }>(() => ({ open: false }));
   const [reviewLoading, setReviewLoading] = React.useState(false);
   const [reviewError, setReviewError] = React.useState<string | null>(null);
   const [reviewData, setReviewData] = React.useState<any | null>(null);
@@ -92,12 +91,7 @@ export default function DataRelationshipsPage() {
     }
   };
 
-  function extractEntities(obj: any): any[] {
-    if (!obj) return [];
-    const root = obj.schema ?? obj;
-    const entities = root?.entities;
-    return Array.isArray(entities) ? entities : [];
-  }
+  // Simplified UI: no inline schema preview
 
   const saveGlobalCanonical = async () => {
     if (!tenantId || !reviewData) return;
@@ -555,17 +549,7 @@ export default function DataRelationshipsPage() {
             <AccordionDetails>
               <List>
                 {connectors.map((c) => (
-                  <ListItem key={c.connector_id} secondaryAction={
-                    <Button
-                      size="small"
-                      onClick={() => {
-                        const entities = extractEntities(c.schema?.raw_schema);
-                        setSchemaModal({ open: true, entities });
-                      }}
-                    >
-                      View
-                    </Button>
-                  }>
+                  <ListItem key={c.connector_id}>
                     <Checkbox
                       checked={selectedConnectorIds.includes(c.connector_id)}
                       onChange={(e) => {
@@ -575,9 +559,9 @@ export default function DataRelationshipsPage() {
                     <ListItemText
                       primary={`${c.type} • ${c.connector_id}`}
                       secondary={(() => {
-                        const count = extractEntities(c.schema?.raw_schema).length;
                         const ts = c.last_schema_fetch ? new Date(c.last_schema_fetch).toLocaleString() : 'Never';
-                        return `${ts} • ${count} entities`;
+                        const status = c.status || 'unknown';
+                        return `${status} • Last fetched: ${ts}`;
                       })()}
                     />
                   </ListItem>
@@ -765,17 +749,7 @@ export default function DataRelationshipsPage() {
             </Accordion>
           )}
 
-          <Dialog open={schemaModal.open} onClose={() => setSchemaModal({ open: false })} maxWidth="md" fullWidth>
-            <DialogTitle>Schema Preview</DialogTitle>
-            <DialogContent>
-              <Box sx={{ p: 1.5 }}>
-                <JsonView src={schemaModal.entities || []} theme="github" collapsed={1} enableClipboard />
-              </Box>
-            </DialogContent>
-            <DialogActions>
-              <Button onClick={() => setSchemaModal({ open: false })}>Close</Button>
-            </DialogActions>
-          </Dialog>
+          {/* Removed schema preview modal for simplified selection UI */}
         </>
       )}
     </Box>

@@ -4,7 +4,10 @@ import os
 import json
 import hashlib
 from datetime import datetime
-from sqlalchemy import text
+from sqlalchemy import text, Table, Column, String as SAString, Text as SAText, DateTime as SADateTime, MetaData, func
+from sqlalchemy.dialects.postgresql import UUID as PGUUID, JSONB
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from pgvector.sqlalchemy import Vector
 from sqlalchemy.orm import Session
 
 from services.llm_client import get_llm_client
@@ -151,36 +154,56 @@ def upsert_cards(db: Session, tenant_id: str, canonical: Dict[str, Any]) -> Dict
     embeddings = _embed_texts(texts)
 
     # Upsert into pgvector-backed table (embedding stored as pgvector 'vector' type)
-    now_iso = datetime.utcnow().isoformat()
+    now_dt = datetime.utcnow()
     rows = []
     for idx, (t, m, k) in enumerate(entity_cards + field_cards + rel_cards):
-        # Prepare JSON and vector literals to avoid driver adaptation issues
-        metadata_json = json.dumps(m)
-        embedding_vec = "[" + ",".join(str(float(x)) for x in (embeddings[idx] or [])) + "]"
         rows.append({
             "tenant_id": tenant_id,
             "key_kind": m.get("card_kind"),
             "key_hash": k,
             "card_text": t,
-            "metadata_json": metadata_json,
-            "embedding_vec": embedding_vec,
-            "created_at": now_iso,
-            "updated_at": now_iso,
+            "metadata": m,
+            "embedding": embeddings[idx],
+            "created_at": now_dt,
+            "updated_at": now_dt,
         })
 
-    # Use INSERT ... ON CONFLICT for idempotent upsert by unique key
-    # We store embedding as float[] for portability; if you switch to pgvector type, adjust migration and casting
+    # Use SQLAlchemy Core with pgvector type for robust binding
+    metadata = MetaData()
+    vector_cards = Table(
+        'vector_cards', metadata,
+        Column('card_id', PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()),
+        Column('tenant_id', PGUUID(as_uuid=True), nullable=False),
+        Column('key_kind', SAString(length=32), nullable=False),
+        Column('key_hash', SAString(length=128), nullable=False),
+        Column('card_text', SAText(), nullable=False),
+        Column('metadata', JSONB, nullable=False),
+        Column('embedding', Vector(), nullable=False),
+        Column('created_at', SADateTime(), nullable=False),
+        Column('updated_at', SADateTime(), nullable=False),
+    )
+
     for r in rows:
-        stmt = text(
-            """
-            INSERT INTO vector_cards (card_id, tenant_id, key_kind, key_hash, card_text, metadata, embedding, created_at, updated_at)
-            VALUES (gen_random_uuid(), :tenant_id, :key_kind, :key_hash, :card_text, CAST(:metadata_json AS JSONB), :embedding_vec::vector, :created_at, :updated_at)
-            ON CONFLICT (tenant_id, key_kind, key_hash)
-            DO UPDATE SET card_text = EXCLUDED.card_text, metadata = EXCLUDED.metadata, embedding = EXCLUDED.embedding, updated_at = EXCLUDED.updated_at
-            """
+        ins = pg_insert(vector_cards).values(
+            tenant_id=r['tenant_id'],
+            key_kind=r['key_kind'],
+            key_hash=r['key_hash'],
+            card_text=r['card_text'],
+            metadata=r['metadata'],
+            embedding=r['embedding'],
+            created_at=r['created_at'],
+            updated_at=r['updated_at'],
         )
-        # psycopg2/pgvector expects a python list for vector; many drivers cast it implicitly
-        db.execute(stmt, r)
+        upsert = ins.on_conflict_do_update(
+            index_elements=[vector_cards.c.tenant_id, vector_cards.c.key_kind, vector_cards.c.key_hash],
+            set_={
+                'card_text': ins.excluded.card_text,
+                'metadata': ins.excluded.metadata,
+                'embedding': ins.excluded.embedding,
+                'updated_at': ins.excluded.updated_at,
+            }
+        )
+        db.execute(upsert)
     db.commit()
 
     return {
