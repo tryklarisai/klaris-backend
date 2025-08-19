@@ -16,7 +16,8 @@ import {
   Tooltip,
   useMediaQuery,
   Breadcrumbs,
-  Link as MuiLink
+  Link as MuiLink,
+  Collapse
 } from "@mui/material";
 import MenuIcon from '@mui/icons-material/Menu';
 import DashboardIcon from '@mui/icons-material/Dashboard';
@@ -27,8 +28,12 @@ import LogoutIcon from '@mui/icons-material/Logout';
 import Brightness4Icon from '@mui/icons-material/Brightness4';
 import Brightness7Icon from '@mui/icons-material/Brightness7';
 import ChatIcon from '@mui/icons-material/Chat';
+import ExpandLess from '@mui/icons-material/ExpandLess';
+import ExpandMore from '@mui/icons-material/ExpandMore';
+import DeleteOutlineRounded from '@mui/icons-material/DeleteOutlineRounded';
+import AddRounded from '@mui/icons-material/AddRounded';
 import { ModeContext } from "../theme/ThemeProvider";
-import { config } from "../config";
+import { config, buildApiUrl } from "../config";
 
 const drawerWidth = 260;
 
@@ -43,10 +48,26 @@ const mainMenu = [
 export default function DashboardLayout() {
   const navigate = useNavigate();
   const location = useLocation();
-  const activeKey = mainMenu.find(item => item.path === location.pathname)?.key || "dashboard";
+  const activeKey = React.useMemo(() => {
+    const p = location.pathname || '';
+    if (p === '/' || p.startsWith('/dashboard')) return 'dashboard';
+    if (p.startsWith('/connectors')) return 'connectors';
+    if (p.startsWith('/relationships')) return 'relationships';
+    if (p.startsWith('/business-context')) return 'business-context';
+    if (p.startsWith('/chat')) return 'chat';
+    return 'dashboard';
+  }, [location.pathname]);
   const isMobile = useMediaQuery('(max-width:900px)');
   const [mobileOpen, setMobileOpen] = React.useState(false);
   const { mode, toggleMode } = React.useContext(ModeContext);
+
+  const [chatExpanded, setChatExpanded] = React.useState(true);
+  const [threads, setThreads] = React.useState<string[]>([]);
+  const [threadsLoading, setThreadsLoading] = React.useState(false);
+  const threadsFetchSeq = React.useRef(0);
+  const currentThreadId = location.pathname.startsWith('/chat/')
+    ? decodeURIComponent(location.pathname.slice('/chat/'.length))
+    : null;
 
   const handleLogout = () => {
     window.localStorage.removeItem("klaris_jwt");
@@ -54,6 +75,73 @@ export default function DashboardLayout() {
     window.localStorage.removeItem("klaris_tenant");
     navigate("/login");
   };
+
+  const fetchThreads = React.useCallback(async () => {
+    const seq = ++threadsFetchSeq.current;
+    setThreadsLoading(true);
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      if (!token) { if (seq === threadsFetchSeq.current) setThreads([]); return; }
+      const resp = await fetch(buildApiUrl('/api/v1/chat/threads'), {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: 'no-store',
+      } as RequestInit);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const list = Array.isArray(data?.threads) ? (data.threads as string[]) : [];
+      if (seq === threadsFetchSeq.current) setThreads(list);
+    } finally {
+      if (seq === threadsFetchSeq.current) setThreadsLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => { fetchThreads(); }, [fetchThreads]);
+
+  // Refresh threads in sidebar when ChatPage creates/deletes threads
+  React.useEffect(() => {
+    const onChanged = () => { fetchThreads(); };
+    window.addEventListener('chat:threads:changed', onChanged as any);
+    return () => window.removeEventListener('chat:threads:changed', onChanged as any);
+  }, [fetchThreads]);
+
+  async function handleCreateThread() {
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      if (!token) { return; }
+      const resp = await fetch(buildApiUrl('/api/v1/chat/threads'), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const tid = String(data?.thread_id || '');
+      if (tid) {
+        navigate(`/chat/${encodeURIComponent(tid)}`);
+        setMobileOpen(false);
+      }
+      await fetchThreads();
+    } catch {
+      // ignore
+    }
+  }
+
+  async function deleteThreadById(id: string) {
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      if (!token) { return; }
+      const resp = await fetch(buildApiUrl(`/api/v1/chat/threads/${encodeURIComponent(id)}`), {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!resp.ok) return;
+      if (currentThreadId === id) {
+        navigate('/chat');
+      }
+      await fetchThreads();
+    } catch {
+      // ignore
+    }
+  }
 
   const drawer = (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -64,17 +152,64 @@ export default function DashboardLayout() {
       <Divider />
       <List sx={{ flex: 1 }}>
         {mainMenu.map(item => (
-          <ListItemButton
-            key={item.key}
-            selected={activeKey === item.key}
-            onClick={() => {
-              navigate(item.path);
-              setMobileOpen(false);
-            }}
-          >
-            {item.icon}
-            <ListItemText primary={item.label} sx={{ ml: 1.5 }} />
-          </ListItemButton>
+          item.key !== 'chat' ? (
+            <ListItemButton
+              key={item.key}
+              selected={activeKey === item.key}
+              onClick={() => {
+                navigate(item.path);
+                setMobileOpen(false);
+              }}
+            >
+              {item.icon}
+              <ListItemText primary={item.label} sx={{ ml: 1.5 }} />
+            </ListItemButton>
+          ) : (
+            <React.Fragment key={item.key}>
+              <ListItemButton
+                selected={activeKey === 'chat'}
+                onClick={() => {
+                  navigate(item.path);
+                  setMobileOpen(false);
+                }}
+              >
+                {item.icon}
+                <ListItemText primary={item.label} sx={{ ml: 1.5 }} />
+                <IconButton size="small" onClick={(e) => { e.stopPropagation(); setChatExpanded(v => !v); }}>
+                  {chatExpanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
+                </IconButton>
+              </ListItemButton>
+              <Collapse in={chatExpanded} timeout="auto" unmountOnExit>
+                <Box sx={{ pl: 5, pr: 1, py: 1 }}>
+                  <Button startIcon={<AddRounded />} size="small" variant="outlined" onClick={handleCreateThread} disabled={threadsLoading}>
+                    New thread
+                  </Button>
+                  <Box sx={{ mt: 1 }}>
+                    {threadsLoading ? (
+                      <Typography variant="caption" color="text.secondary">Loading…</Typography>
+                    ) : threads.length === 0 ? (
+                      <Typography variant="caption" color="text.secondary">No threads</Typography>
+                    ) : (
+                      threads.map((t) => (
+                        <Box key={t} sx={{ display: 'flex', alignItems: 'center' }}>
+                          <ListItemButton
+                            selected={currentThreadId === t}
+                            onClick={() => { navigate(`/chat/${encodeURIComponent(t)}`); setMobileOpen(false); }}
+                            sx={{ borderRadius: 1 }}
+                          >
+                            <ListItemText primaryTypographyProps={{ noWrap: true }} primary={t} />
+                          </ListItemButton>
+                          <IconButton size="small" color="error" onClick={() => deleteThreadById(t)}>
+                            <DeleteOutlineRounded fontSize="small" />
+                          </IconButton>
+                        </Box>
+                      ))
+                    )}
+                  </Box>
+                </Box>
+              </Collapse>
+            </React.Fragment>
+          )
         ))}
       </List>
       <Divider />

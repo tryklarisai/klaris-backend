@@ -28,6 +28,7 @@ function App() {
               <Route path="relationships" element={<DataRelationshipsPage />} />
               <Route path="business-context" element={<BusinessContextPage />} />
               <Route path="chat" element={<ChatPage />} />
+              <Route path="chat/:threadId" element={<ChatPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>
