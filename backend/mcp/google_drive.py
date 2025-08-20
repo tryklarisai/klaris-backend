@@ -15,7 +15,8 @@ class GoogleDriveMCPAdapter:
     @staticmethod
     def list_files(config: Dict[str, Any]) -> list:
         """
-        Lists all files/folders in Google Drive for the authorized user.
+        Lists relevant files in Google Drive for the authorized user.
+        Returns only document files (.docx, .doc, .txt, .pdf) and spreadsheets, excluding folders.
         Returns a list of dicts with id, name, mimeType, sorted by modifiedTime descending, limit 1000.
         """
         access_token = config.get("oauth_access_token")
@@ -35,9 +36,31 @@ class GoogleDriveMCPAdapter:
         )
         drive_service = google_build("drive", "v3", credentials=creds)
 
+        # Define allowed MIME types for document files and schema data
+        allowed_mime_types = [
+            # Google Workspace files (schema/data)
+            "application/vnd.google-apps.spreadsheet",
+            "application/vnd.google-apps.document",
+            # Microsoft Office files
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+            "application/msword",  # .doc
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # .xlsx
+            "application/vnd.ms-excel",  # .xls
+            # Text and PDF files
+            "text/plain",  # .txt
+            "application/pdf",  # .pdf
+            # CSV files (useful for schema data)
+            "text/csv",
+            "application/csv"
+        ]
+        
+        # Build query to exclude folders and filter by allowed file types
+        mime_conditions = " or ".join([f"mimeType = '{mime}'" for mime in allowed_mime_types])
+        query = f"trashed = false and not mimeType = 'application/vnd.google-apps.folder' and ({mime_conditions})"
+
         # Get files, sorted by updated time, limited to 1000
         files_response = drive_service.files().list(
-            q="trashed = false and not mimeType contains 'image/' and not mimeType contains 'video/'",
+            q=query,
             orderBy="modifiedTime desc",
             fields="files(id, name, mimeType)",
             pageSize=1000

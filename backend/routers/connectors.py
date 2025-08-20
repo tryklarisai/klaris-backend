@@ -162,6 +162,7 @@ def google_drive_callback(request: Request, db: Session = Depends(get_db)):
     connector = Connector(
         connector_id=uuid4(),
         tenant_id=tenant_id,
+        name=None,  # Will be set later during file selection
         type=ConnectorType.GOOGLE_DRIVE.value,
         config={
             # Don't persist access_token beyond expiry; refresh_token is for renewals
@@ -176,10 +177,10 @@ def google_drive_callback(request: Request, db: Session = Depends(get_db)):
     )
     db.add(connector)
     db.commit()
-    # Redirect back to the Connectors list page on the frontend.
+    # Redirect to the connector detail page for file selection and naming
     # FRONTEND_URL is expected to be just the host (e.g., https://demo.tryklaris.ai)
     base = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    redirect_url = f"{base.rstrip('/')}/connectors?gdrive=success"
+    redirect_url = f"{base.rstrip('/')}/connectors/{connector.connector_id}?setup=true"
     return RedirectResponse(redirect_url)
 
 # Original connectors CRUD API
@@ -335,6 +336,7 @@ def create_connector(
     now = datetime.utcnow()
     connector = Connector(
         tenant_id=str(tenant_id),
+        name=request.name,
         type=request.type.value,
         config=request.config,
         status=ConnectorStatus.FAILED,  # pessimistic by default
@@ -374,6 +376,7 @@ def list_connectors(
             }
         result.append(ConnectorSummary(
             connector_id=conn.connector_id,
+            name=conn.name,
             type=conn.type,
             status=conn.status.value,
             created_at=conn.created_at.isoformat() if getattr(conn, 'created_at', None) else None,
@@ -534,6 +537,7 @@ def update_connector(
         }
     return ConnectorSummary(
         connector_id=connector.connector_id,
+        name=connector.name,
         type=connector.type,
         status=connector.status.value,
         created_at=connector.created_at.isoformat() if getattr(connector, 'created_at', None) else None,
@@ -572,7 +576,7 @@ def patch_connector(
     connector = db.query(Connector).filter_by(tenant_id=tenant_id, connector_id=connector_id).first()
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
-    allowed_fields = ["connector_metadata", "config", "status", "type"]
+    allowed_fields = ["connector_metadata", "config", "status", "type", "name"]
     made_update = False
     for key in allowed_fields:
         if key in patch_data and patch_data[key] is not None:
@@ -594,6 +598,7 @@ def patch_connector(
         }
     return ConnectorSummary(
         connector_id=connector.connector_id,
+        name=connector.name,
         type=connector.type,
         status=connector.status.value,
         created_at=connector.created_at.isoformat() if getattr(connector, 'created_at', None) else None,

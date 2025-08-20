@@ -25,6 +25,7 @@ class Connector(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
     )
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)  # User-defined connector name
     type: Mapped[str] = mapped_column(String(32), nullable=False)  # e.g., "postgres", "gdrive"
     config: Mapped[Any] = mapped_column(JSONB, nullable=False)
     connector_metadata: Mapped[Any] = mapped_column(JSONB, nullable=True)  # For user state/config unrelated to credentials

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Box, Button, Typography, Alert, CircularProgress, Chip, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemIcon, ListItemText, Checkbox, Stack, Tabs, Tab, Tooltip, TextField, MenuItem,
   Table, TableHead, TableRow, TableCell, TableBody
@@ -29,6 +29,8 @@ interface GoogleDriveFile {
 export default function ConnectorDetailPage() {
   const { connectorId } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const isSetupMode = searchParams.get('setup') === 'true';
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -55,6 +57,12 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
   const [schemaModalOpen, setSchemaModalOpen] = useState(false);
   const [collapsed, setCollapsed] = useState<boolean | number>(2);
   const { notify } = React.useContext(SnackbarContext);
+  
+  // Setup flow states
+  const [connectorName, setConnectorName] = useState('');
+  const [namingStep, setNamingStep] = useState(false);
+  const [autoFileSelection, setAutoFileSelection] = useState(false);
+  const [autoSchemaFetch, setAutoSchemaFetch] = useState(false);
 
   useEffect(() => {
     const tStr = window.localStorage.getItem('klaris_tenant');
@@ -70,6 +78,13 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
     if (tenantId && connectorId) fetchDetail();
     // eslint-disable-next-line
   }, [tenantId, connectorId]);
+
+  // Setup flow: automatically start naming step for new Google Drive connectors
+  useEffect(() => {
+    if (isSetupMode && data && data.type === 'google_drive' && !data.name) {
+      setNamingStep(true);
+    }
+  }, [isSetupMode, data]);
 
   // Auto-load full schema when switching to Schema tab
   useEffect(() => {
@@ -167,11 +182,41 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
       setSchema(pretty);
       setData((d: any) => ({ ...(d || {}), schema: pretty, last_schema_fetch: result.fetched_at }));
       setSchemaMessage('Schema fetched successfully');
+      setAutoSchemaFetch(false); // Reset auto-fetch flag
       fetchDetail(); // update display
     } catch (err: any) {
       setSchemaMessage(err.message || 'Failed to fetch schema');
+      setAutoSchemaFetch(false);
     } finally {
       setFetchingSchema(false);
+    }
+  };
+
+  const handleSaveName = async () => {
+    if (!tenantId || !connectorId || !connectorName.trim()) return;
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: connectorName.trim() }),
+      });
+      if (!resp.ok) throw new Error('Failed to save connector name');
+      await fetchDetail();
+      setNamingStep(false);
+      // Auto-open file selection for Google Drive
+      if (data?.type === 'google_drive') {
+        setAutoFileSelection(true);
+        setSelectModalOpen('drive');
+        setFilesLoading(true);
+        setFilesError(null);
+        fetchDriveFiles();
+      }
+    } catch (err: any) {
+      notify(err.message || 'Failed to save name', 'error');
     }
   };
 
@@ -468,6 +513,13 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
               </Stack>
             )}
           {(retestMessage) && <Alert severity={retestMessage.includes('success') ? 'success' : 'error'} sx={{ mt: 2 }}>{retestMessage}</Alert>}
+      {autoSchemaFetch && (
+        <Alert severity="info" sx={{ mt: 2 }}>
+          <Typography variant="body2">
+            Setting up your connector... Automatically fetching schema from selected files.
+          </Typography>
+        </Alert>
+      )}
         </Box>
       )}
       {/* Schema modal removed in favor of inline view */}
@@ -547,6 +599,15 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                       setSelectedTableRows([...(selectedIds as string[])]);
                     }
                 setSelectModalOpen(false);
+                
+                // Auto-proceed to schema discovery if in setup flow
+                if (autoFileSelection && selectedIds.length > 0) {
+                  setAutoFileSelection(false);
+                  setAutoSchemaFetch(true);
+                  setTimeout(() => {
+                    handleFetchSchema();
+                  }, 500); // Small delay for better UX
+                }
               } catch (err: any) {
                 setFilesError(err.message || 'Failed to save');
               }
@@ -557,6 +618,40 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
             color="primary"
           >
             {savingSelection ? 'Saving...' : 'Save'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+      
+      {/* Connector Naming Dialog */}
+      <Dialog open={namingStep} maxWidth="sm" fullWidth>
+        <DialogTitle>Name Your Google Drive Connector</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            Give your Google Drive connector a name to help you identify it later.
+          </Typography>
+          <TextField
+            autoFocus
+            label="Connector Name"
+            placeholder="e.g., My Google Drive Documents"
+            fullWidth
+            value={connectorName}
+            onChange={(e) => setConnectorName(e.target.value)}
+            onKeyPress={(e) => {
+              if (e.key === 'Enter' && connectorName.trim()) {
+                handleSaveName();
+              }
+            }}
+            margin="normal"
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setNamingStep(false)}>Skip</Button>
+          <Button 
+            onClick={handleSaveName}
+            variant="contained"
+            disabled={!connectorName.trim()}
+          >
+            Continue
           </Button>
         </DialogActions>
       </Dialog>
