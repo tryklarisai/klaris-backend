@@ -27,9 +27,10 @@ from uuid import UUID
 
 def make_json_safe(obj):
     """
-    Recursively convert any UUID or datetime in dict/list to string, so that the structure becomes fully JSON serializable.
+    Recursively convert any UUID, datetime, date, or Decimal in dict/list to string/number, so that the structure becomes fully JSON serializable.
     """
-    from datetime import datetime
+    from datetime import datetime, date
+    from decimal import Decimal
     if isinstance(obj, dict):
         return {k: make_json_safe(v) for k, v in obj.items()}
     elif isinstance(obj, list):
@@ -38,6 +39,10 @@ def make_json_safe(obj):
         return str(obj)
     elif isinstance(obj, datetime):
         return obj.isoformat()
+    elif isinstance(obj, date):
+        return obj.isoformat()
+    elif isinstance(obj, Decimal):
+        return float(obj)
     else:
         return obj
 
@@ -346,7 +351,33 @@ def create_connector(
     db.add(connector)
     db.flush()  # get generated connector_id (UUID)
 
-    # Skip MCP connection and schema fetch
+    # Test connection for Postgres connectors
+    if connector.type == "postgres":
+        try:
+            # Test connection using psycopg2 directly
+            import psycopg2
+            conn_config = connector.config
+            conn = psycopg2.connect(
+                host=conn_config.get('host'),
+                port=conn_config.get('port', 5432),
+                user=conn_config.get('user'),
+                password=conn_config.get('password'),
+                database=conn_config.get('database'),
+                connect_timeout=10
+            )
+            # Test with a simple query
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            connector.status = ConnectorStatus.ACTIVE
+            connector.error_message = None
+        except Exception as e:
+            connector.status = ConnectorStatus.FAILED
+            connector.error_message = f"Connection failed: {str(e)}"
+    
     db.commit()
     return ConnectorCreateResponse(
         connector_id=connector.connector_id,
@@ -665,3 +696,35 @@ def get_schema_for_connector(
     if not schema:
         raise HTTPException(status_code=404, detail="Schema not found for this connector")
     return SchemaRead.model_validate(schema)
+
+
+@router.delete(
+    "/{connector_id}",
+    summary="Delete a connector and all associated schemas",
+    tags=["Connectors"],
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        204: {"description": "Connector successfully deleted."},
+        404: {"description": "Connector not found."},
+        403: {"description": "Forbidden tenant."}
+    },
+)
+def delete_connector(
+    tenant_id: str,
+    connector_id: str,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    """
+    Delete a connector and all associated schemas.
+    This operation is irreversible.
+    """
+    check_auth_and_tenant(credentials, tenant_id)
+    connector = db.query(Connector).filter_by(tenant_id=tenant_id, connector_id=connector_id).first()
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    
+    # Delete the connector (schemas will be deleted via cascade)
+    db.delete(connector)
+    db.commit()
+    return None

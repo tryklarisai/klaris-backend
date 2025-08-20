@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Box, Button, Typography, Alert, TextField, MenuItem, Stack, Chip, Dialog, DialogTitle, DialogContent, DialogActions, Link
+  Box, Button, Typography, Alert, TextField, MenuItem, Stack, Chip, Dialog, DialogTitle, DialogContent, DialogActions, Link, IconButton
 } from '@mui/material';
+import DeleteIcon from '@mui/icons-material/Delete';
 // Avoid Grid to reduce typings complexity in modal; simple Box layout instead
 import { LoadingButton } from '@mui/lab';
 import { DataGrid, GridColDef, GridRowParams } from '@mui/x-data-grid';
@@ -37,6 +38,11 @@ export default function ConnectorsPage() {
   const [error, setError] = useState<string | null>(null);
   const [showPostgresForm, setShowPostgresForm] = useState(false);
   // Removed tabs - now showing new connector by default with Your Connectors below
+
+  // Delete states
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [connectorToDelete, setConnectorToDelete] = useState<Connector | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   // Modal state
   const [addLoading, setAddLoading] = useState(false);
@@ -123,6 +129,30 @@ export default function ConnectorsPage() {
     }
   };
 
+  const handleDeleteConnector = async () => {
+    if (!connectorToDelete || !tenantId) return;
+    setDeleting(true);
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorToDelete.connector_id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!resp.ok) {
+        const data = await resp.json();
+        throw new Error(data?.error || 'Failed to delete connector');
+      }
+      // Refresh the connectors list
+      await fetchConnectors();
+      setDeleteDialogOpen(false);
+      setConnectorToDelete(null);
+    } catch (err: any) {
+      setError(err.message || 'Failed to delete connector');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const columns: GridColDef[] = [
     { field: 'name', headerName: 'Name', flex: 1, minWidth: 160, renderCell: ({ value, row }) => value || `${row.type} Connector` },
     { field: 'type', headerName: 'Type', width: 120 },
@@ -146,6 +176,25 @@ export default function ConnectorsPage() {
           <Chip size="small" variant="outlined" label={formatRelativeTime(params.value)} />
         </Tooltip>
       ) : <Chip size="small" variant="outlined" label="Never" />,
+    },
+    {
+      field: 'actions',
+      headerName: 'Actions',
+      width: 80,
+      sortable: false,
+      renderCell: (params) => (
+        <IconButton
+          size="small"
+          onClick={(e) => {
+            e.stopPropagation(); // Prevent row click navigation
+            setConnectorToDelete(params.row);
+            setDeleteDialogOpen(true);
+          }}
+          color="error"
+        >
+          <DeleteIcon fontSize="small" />
+        </IconButton>
+      ),
     },
   ];
 
@@ -328,6 +377,30 @@ export default function ConnectorsPage() {
           </DialogActions>
         </Dialog>
       )}
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteDialogOpen} onClose={() => !deleting && setDeleteDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Delete Connector</DialogTitle>
+        <DialogContent>
+          <Typography variant="body1" sx={{ mb: 2 }}>
+            Are you sure you want to delete the connector "{connectorToDelete?.name || `${connectorToDelete?.type} Connector`}"?
+          </Typography>
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            This action cannot be undone. All schemas and configuration data for this connector will be permanently deleted.
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteDialogOpen(false)} disabled={deleting}>Cancel</Button>
+          <LoadingButton 
+            onClick={handleDeleteConnector}
+            loading={deleting}
+            variant="contained"
+            color="error"
+          >
+            Delete
+          </LoadingButton>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

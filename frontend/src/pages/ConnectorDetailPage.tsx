@@ -2,8 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Box, Button, Typography, Alert, CircularProgress, Chip, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemIcon, ListItemText, Checkbox, Stack, Tabs, Tab, Tooltip, TextField, MenuItem,
-  Table, TableHead, TableRow, TableCell, TableBody
+  Table, TableHead, TableRow, TableCell, TableBody, IconButton
 } from '@mui/material';
+import DeleteIcon from '@mui/icons-material/Delete';
 import JsonView from 'react18-json-view';
 import 'react18-json-view/src/style.css';
 import { SnackbarContext } from '../ui/SnackbarProvider';
@@ -63,6 +64,10 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
   const [namingStep, setNamingStep] = useState(false);
   const [autoFileSelection, setAutoFileSelection] = useState(false);
   const [autoSchemaFetch, setAutoSchemaFetch] = useState(false);
+
+  // Delete states
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     const tStr = window.localStorage.getItem('klaris_tenant');
@@ -220,6 +225,30 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
     }
   };
 
+  const handleDeleteConnector = async () => {
+    if (!tenantId || !connectorId) return;
+    setDeleting(true);
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!resp.ok) {
+        const errorData = await resp.json();
+        throw new Error(errorData?.error || 'Failed to delete connector');
+      }
+      // Navigate back to connectors list
+      navigate('/connectors');
+      notify('Connector deleted successfully', 'success');
+    } catch (err: any) {
+      notify(err.message || 'Failed to delete connector', 'error');
+    } finally {
+      setDeleting(false);
+      setDeleteDialogOpen(false);
+    }
+  };
+
   // Fetch Google Drive files for the picker
   async function fetchDriveFiles() {
     if (!tenantId || !connectorId) return;
@@ -289,11 +318,23 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
     <Box sx={{ width: '100%', py: 1 }}>
       {loading ? <CircularProgress /> : error ? <Alert severity="error">{error}</Alert> : (
         <Box>
-          <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 1 }}>
-            <Tab label="Overview" />
-            <Tab label={data.type === 'postgres' ? 'Select Tables' : 'Select Files'} />
-            <Tab label="Schema" />
-          </Tabs>
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+            <Tabs value={tab} onChange={(_, v) => setTab(v)}>
+              <Tab label="Overview" />
+              <Tab label={data.type === 'postgres' ? 'Select Tables' : 'Select Files'} />
+              <Tab label="Schema" />
+            </Tabs>
+            <Button
+              variant="outlined"
+              color="error"
+              size="small"
+              startIcon={<DeleteIcon />}
+              onClick={() => setDeleteDialogOpen(true)}
+              disabled={deleting}
+            >
+              Delete Connector
+            </Button>
+          </Box>
 
           {tab === 0 && (
             <Box>
@@ -652,6 +693,30 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
             disabled={!connectorName.trim()}
           >
             Continue
+          </Button>
+        </DialogActions>
+      </Dialog>
+      
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteDialogOpen} onClose={() => !deleting && setDeleteDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Delete Connector</DialogTitle>
+        <DialogContent>
+          <Typography variant="body1" sx={{ mb: 2 }}>
+            Are you sure you want to delete the connector "{data?.name || `${data?.type} Connector`}"?
+          </Typography>
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            This action cannot be undone. All schemas and configuration data for this connector will be permanently deleted.
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteDialogOpen(false)} disabled={deleting}>Cancel</Button>
+          <Button 
+            onClick={handleDeleteConnector}
+            variant="contained"
+            color="error"
+            disabled={deleting}
+          >
+            {deleting ? 'Deleting...' : 'Delete'}
           </Button>
         </DialogActions>
       </Dialog>
