@@ -37,6 +37,9 @@ export default function ConnectorsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showPostgresForm, setShowPostgresForm] = useState(false);
+  const [showGoogleDriveModal, setShowGoogleDriveModal] = useState(false);
+  const [googleDriveName, setGoogleDriveName] = useState("");
+  const [googleDriveErr, setGoogleDriveErr] = useState<string | null>(null);
   // Removed tabs - now showing new connector by default with Your Connectors below
 
   // Delete states
@@ -208,12 +211,47 @@ export default function ConnectorsPage() {
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', md: 'repeat(3, 1fr)' }, gap: 2, minWidth: 0 }}>
           {/* Google Drive */}
           <Box sx={{ p: 2, border: '1px solid', borderColor: 'divider', borderRadius: 2, cursor: 'pointer', minWidth: 0 }}
-            onClick={() => {
-              if (!tenantId) return;
-              const url = `${API_URL}/connectors/google-drive/authorize?tenant_id=${tenantId}`;
-              window.location.href = url; // Use same window for smoother flow
-            }}
+            onClick={() => setShowGoogleDriveModal(true)}
           >
+      {/* Google Drive Connector Name Modal */}
+      <Dialog open={showGoogleDriveModal} onClose={() => setShowGoogleDriveModal(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Google Drive Connector</DialogTitle>
+        <DialogContent>
+          <TextField
+            label="Connector Name"
+            placeholder="Enter a name for this connection"
+            fullWidth
+            margin="normal"
+            value={googleDriveName}
+            onChange={e => setGoogleDriveName(e.target.value)}
+            required
+          />
+          {googleDriveErr && <Alert severity="error" sx={{ mt: 1 }}>{googleDriveErr}</Alert>}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setShowGoogleDriveModal(false)}>Cancel</Button>
+          <LoadingButton
+            onClick={() => {
+              setGoogleDriveErr(null);
+              if (!googleDriveName.trim()) {
+                setGoogleDriveErr("Connector name is required.");
+                return;
+              }
+              if (!tenantId) {
+                setGoogleDriveErr("Tenant not found.");
+                return;
+              }
+              // Optionally: Save the connector name in localStorage or pass as query param
+              // For now, pass as query param
+              const url = `${API_URL}/connectors/google-drive/authorize?tenant_id=${tenantId}&name=${encodeURIComponent(googleDriveName.trim())}`;
+              window.location.href = url;
+            }}
+            variant="contained"
+          >
+            Proceed to OAuth
+          </LoadingButton>
+        </DialogActions>
+      </Dialog>
             <Stack direction="row" spacing={2} alignItems="center" sx={{ minWidth: 0 }}>
               <GoogleDriveSvg width={32} height={32} style={{ flexShrink: 0 }} />
               <Box sx={{ minWidth: 0 }}>

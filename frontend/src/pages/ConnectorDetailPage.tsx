@@ -567,7 +567,7 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
       {/* Google Drive File/Folder Picker Modal */}
       <Dialog open={!!selectModalOpen} onClose={() => setSelectModalOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>
-          {selectModalOpen === 'drive' ? 'Select Google Drive Files/Folders' : 'Select Postgres Tables'}
+          {selectModalOpen === 'drive' ? 'Select Google Drive Files' : 'Select Postgres Tables'}
         </DialogTitle>
         <DialogContent>
           {filesLoading ? (
@@ -583,31 +583,34 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                   .map(selId => driveFiles.find(f => f.id === selId))
                   .filter(Boolean),
                 ...driveFiles.filter(f => !selectedIds.includes(f.id)),
-              ].map((f: any) => f && (
-                <ListItem
-                  key={f.id}
-                  dense
-                  component="button"
-                  onClick={() => {
-                    setSelectedIds(selectedIds.includes(f.id)
-                      ? selectedIds.filter(id => id !== f.id)
-                      : [...selectedIds, f.id]);
-                  }}
-                >
-                  <ListItemIcon>
-                    <Checkbox
-                      edge="start"
-                      checked={selectedIds.includes(f.id)}
-                      tabIndex={-1}
-                      disableRipple
+              ]
+                // Filter out folders for Google Drive selection
+                .filter((f: any) => selectModalOpen !== 'drive' || (f && f.mimeType !== 'application/vnd.google-apps.folder'))
+                .map((f: any) => f && (
+                  <ListItem
+                    key={f.id}
+                    dense
+                    component="button"
+                    onClick={() => {
+                      setSelectedIds(selectedIds.includes(f.id)
+                        ? selectedIds.filter(id => id !== f.id)
+                        : [...selectedIds, f.id]);
+                    }}
+                  >
+                    <ListItemIcon>
+                      <Checkbox
+                        edge="start"
+                        checked={selectedIds.includes(f.id)}
+                        tabIndex={-1}
+                        disableRipple
+                      />
+                    </ListItemIcon>
+                    <ListItemText
+                      primary={f.name}
+                      secondary={selectModalOpen === 'drive' ? f.mimeType : undefined}
                     />
-                  </ListItemIcon>
-                  <ListItemText
-                    primary={f.name}
-                    secondary={selectModalOpen === 'drive' ? f.mimeType : undefined}
-                  />
-                </ListItem>
-              ))}
+                  </ListItem>
+                ))}
             </List>
           )}
         </DialogContent>

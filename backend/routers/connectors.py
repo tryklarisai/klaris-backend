@@ -75,6 +75,7 @@ def google_drive_authorize(request: Request):
     client_id = os.getenv("GOOGLE_CLIENT_ID")
     redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI")
     tenant_id = request.query_params.get("tenant_id")
+    connector_name = request.query_params.get("name")
     if not client_id or not redirect_uri:
         raise HTTPException(status_code=500, detail="OAuth env not configured")
     if tenant_id is None:
@@ -82,7 +83,9 @@ def google_drive_authorize(request: Request):
     scope = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/spreadsheets.readonly"
     # Secure random CSRF token (nonce)
     csrf_token = secrets.token_urlsafe(16)
-    state = f"{csrf_token}:{tenant_id}"
+    # Pass connector_name in state if provided (URL-encoded)
+    import urllib.parse
+    state = f"{csrf_token}:{tenant_id}:{urllib.parse.quote(connector_name) if connector_name else ''}"
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -104,6 +107,7 @@ def google_drive_callback(request: Request, db: Session = Depends(get_db)):
     """
     import requests as pyrequests
     import os
+    import urllib.parse
     from datetime import datetime, timedelta
     from models.connector import ConnectorStatus, Connector
     from schemas.connector import ConnectorType
@@ -118,7 +122,12 @@ def google_drive_callback(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Missing authorization code (OAuth callback)")
     if not state or ":" not in state:
         raise HTTPException(status_code=400, detail="Invalid state param (missing tenant id)")
-    csrf_token, tenant_id = state.split(":", 1)
+    # Accept state as csrf_token:tenant_id:connector_name (connector_name may be empty)
+    parts = state.split(":", 2)
+    if len(parts) < 2:
+        raise HTTPException(status_code=400, detail="Invalid state param")
+    csrf_token, tenant_id = parts[0], parts[1]
+    connector_name = urllib.parse.unquote(parts[2]) if len(parts) > 2 else None
     # TODO: validate CSRF/nonce if tracking sessions
     client_id = os.getenv("GOOGLE_CLIENT_ID")
     client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -167,7 +176,7 @@ def google_drive_callback(request: Request, db: Session = Depends(get_db)):
     connector = Connector(
         connector_id=uuid4(),
         tenant_id=tenant_id,
-        name=None,  # Will be set later during file selection
+        name=connector_name if connector_name else None,
         type=ConnectorType.GOOGLE_DRIVE.value,
         config={
             # Don't persist access_token beyond expiry; refresh_token is for renewals
