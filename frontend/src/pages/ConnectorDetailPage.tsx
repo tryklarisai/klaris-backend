@@ -9,7 +9,9 @@ import JsonView from 'react18-json-view';
 import 'react18-json-view/src/style.css';
 import { SnackbarContext } from '../ui/SnackbarProvider';
 // Alignments only; no Grid needed here
-import { buildApiUrl } from '../config';
+import { buildApiUrl, config } from '../config';
+import GoogleDrivePicker, { GoogleDriveFile } from '../components/GoogleDrivePicker';
+import { GOOGLE_DRIVE_MIME_TYPES } from '../utils/googlePicker';
 
 const API_URL = buildApiUrl('');
 
@@ -21,11 +23,6 @@ function redactConfig(config: any) {
   return redacted;
 }
 
-interface GoogleDriveFile {
-  id: string;
-  name: string;
-  mimeType: string;
-}
 
 export default function ConnectorDetailPage() {
   const { connectorId } = useParams();
@@ -463,19 +460,73 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
               {data.type === 'google_drive' && (
                 <>
                   <Stack direction="row" gap={1} alignItems="center">
-                    <Button
-                      variant="outlined"
-                      onClick={() => {
-                        setSelectModalOpen('drive');
-                        setFilesLoading(true);
-                        setFilesError(null);
-                        fetchDriveFiles();
-                      }}
-                    >
-                      {data?.connector_metadata?.selected_drive_file_ids?.length
-                        ? 'Edit Selection'
-                        : 'Select Google Drive Files/Folders'}
-                    </Button>
+                    {config.googleApiKey && data?.config?.oauth_access_token ? (
+                      <GoogleDrivePicker
+                        accessToken={data.config.oauth_access_token}
+                        developerKey={config.googleApiKey}
+                        onFilesSelected={async (files) => {
+                          setSavingSelection(true);
+                          try {
+                            const token = window.localStorage.getItem('klaris_jwt');
+                            const fileIds = files.map(file => file.id);
+                            const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
+                              method: 'PATCH',
+                              headers: {
+                                'Authorization': `Bearer ${token}`,
+                                'Content-Type': 'application/json',
+                              },
+                              body: JSON.stringify({
+                                connector_metadata: { selected_drive_file_ids: fileIds }
+                              }),
+                            });
+                            if (!resp.ok) throw new Error('Failed to save selection');
+                            await fetchDetail();
+                            notify('Files selected successfully', 'success');
+                            
+                            // Auto-proceed to schema discovery if in setup flow
+                            if (autoFileSelection && fileIds.length > 0) {
+                              setAutoFileSelection(false);
+                              setAutoSchemaFetch(true);
+                              setTimeout(() => {
+                                handleFetchSchema();
+                              }, 500);
+                            }
+                          } catch (err: any) {
+                            notify(err.message || 'Failed to save selection', 'error');
+                          } finally {
+                            setSavingSelection(false);
+                          }
+                        }}
+                        onCancel={() => {
+                          console.log('Google Drive Picker cancelled');
+                        }}
+                        buttonText="Select Google Drive Files"
+                        editButtonText="Edit Selection"
+                        multiselect={true}
+                        includeFolders={true}
+                        mimeTypes={GOOGLE_DRIVE_MIME_TYPES.ALL_DOCUMENTS}
+                        pickerTitle="Select files from Google Drive"
+                        disabled={savingSelection}
+                        loading={savingSelection}
+                        selectedFileIds={data?.connector_metadata?.selected_drive_file_ids || []}
+                        variant="outlined"
+                        color="primary"
+                      />
+                    ) : (
+                      <Button
+                        variant="outlined"
+                        onClick={() => {
+                          setSelectModalOpen('drive');
+                          setFilesLoading(true);
+                          setFilesError(null);
+                          fetchDriveFiles();
+                        }}
+                      >
+                        {data?.connector_metadata?.selected_drive_file_ids?.length
+                          ? 'Edit Selection'
+                          : 'Select Google Drive Files/Folders'}
+                      </Button>
+                    )}
                     {data?.connector_metadata?.selected_drive_file_ids?.length > 0 && (
                       <Chip label={`${data.connector_metadata.selected_drive_file_ids.length} items`} color="info" size="small" />
                     )}
