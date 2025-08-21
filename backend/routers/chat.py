@@ -16,6 +16,7 @@ import jwt
 import json
 
 from db import get_db
+from models.tenant import ChatThread
 from agents.chat_graph import run_chat_agent_stream, create_thread, list_threads, delete_thread
 
 router = APIRouter(prefix="/api/v1", tags=["Chat"])
@@ -48,6 +49,10 @@ class ChatResponse(BaseModel):
     clarifications: Optional[List[str]] = None
 
 
+class CreateThreadBody(BaseModel):
+    title: Optional[str] = None
+
+
 def _get_tenant_from_token(credentials: HTTPAuthorizationCredentials) -> UUID:
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -70,6 +75,29 @@ async def chat_endpoint(
     credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
 ):
     tenant_id = _get_tenant_from_token(credentials)
+    # Best-effort: ensure thread exists in DB and set auto-title if missing
+    if body.thread_id:
+        try:
+            th = (
+                db.query(ChatThread)
+                .filter(ChatThread.tenant_id == tenant_id, ChatThread.thread_id == body.thread_id)
+                .first()
+            )
+            if th is None:
+                th = ChatThread(thread_id=str(body.thread_id), tenant_id=tenant_id, title=None)
+                db.add(th)
+                db.commit()
+            if (th.title is None or str(th.title).strip() == "") and (body.message or "").strip():
+                # Use first 5 words as a friendly title
+                words = (body.message or "").strip().split()
+                snippet = " ".join(words[:5])
+                th.title = f"Q: {snippet}" if snippet else f"Thread - {str(body.thread_id)[:8]}"
+                db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
     gen = run_chat_agent_stream(db, tenant_id, body.message, thread_id=body.thread_id)
     answer: str = ""
     route: Optional[Dict[str, Any]] = None
@@ -130,6 +158,28 @@ async def chat_stream_endpoint(
       - done: stream termination sentinel
     """
     tenant_id = _get_tenant_from_token(credentials)
+    # Best-effort: ensure thread exists in DB and set auto-title if missing
+    if body.thread_id:
+        try:
+            th = (
+                db.query(ChatThread)
+                .filter(ChatThread.tenant_id == tenant_id, ChatThread.thread_id == body.thread_id)
+                .first()
+            )
+            if th is None:
+                th = ChatThread(thread_id=str(body.thread_id), tenant_id=tenant_id, title=None)
+                db.add(th)
+                db.commit()
+            if (th.title is None or str(th.title).strip() == "") and (body.message or "").strip():
+                words = (body.message or "").strip().split()
+                snippet = " ".join(words[:5])
+                th.title = f"Q: {snippet}" if snippet else f"Thread - {str(body.thread_id)[:8]}"
+                db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
     gen = run_chat_agent_stream(db, tenant_id, body.message, thread_id=body.thread_id)
     headers = {
         "Cache-Control": "no-cache",
@@ -141,11 +191,26 @@ async def chat_stream_endpoint(
 
 @router.post("/chat/threads")
 async def create_thread_endpoint(
+    body: Optional[CreateThreadBody] = None,
     db: Session = Depends(get_db),
     credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
 ):
     tenant_id = _get_tenant_from_token(credentials)
     tid = create_thread(tenant_id)
+    # Persist thread metadata with optional title
+    try:
+        title = None
+        if body and isinstance(body, CreateThreadBody) and body.title:
+            t = str(body.title).strip()
+            title = t if t else None
+        th = ChatThread(thread_id=str(tid), tenant_id=tenant_id, title=title)
+        db.add(th)
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
     return {"thread_id": tid}
 
 
@@ -155,7 +220,23 @@ async def list_threads_endpoint(
     credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
 ):
     tenant_id = _get_tenant_from_token(credentials)
-    return {"threads": list_threads(tenant_id)}
+    try:
+        rows = (
+            db.query(ChatThread)
+            .filter(ChatThread.tenant_id == tenant_id)
+            .order_by(ChatThread.updated_at.desc())
+            .all()
+        )
+        if rows:
+            return {"threads": [{"thread_id": r.thread_id, "title": r.title} for r in rows]}
+    except Exception:
+        pass
+    # Fallback to in-memory thread ids if DB is empty or unavailable
+    try:
+        ids = list_threads(tenant_id)
+    except Exception:
+        ids = []
+    return {"threads": [{"thread_id": i, "title": None} for i in ids]}
 
 
 @router.delete("/chat/threads/{thread_id}")
@@ -165,7 +246,29 @@ async def delete_thread_endpoint(
     credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
 ):
     tenant_id = _get_tenant_from_token(credentials)
-    ok = delete_thread(tenant_id, thread_id)
-    if not ok:
+    deleted = False
+    # Remove from DB first
+    try:
+        th = (
+            db.query(ChatThread)
+            .filter(ChatThread.tenant_id == tenant_id, ChatThread.thread_id == thread_id)
+            .first()
+        )
+        if th is not None:
+            db.delete(th)
+            db.commit()
+            deleted = True
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    # Remove from in-memory histories
+    try:
+        if delete_thread(tenant_id, thread_id):
+            deleted = True
+    except Exception:
+        pass
+    if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Thread not found")
     return {"deleted": True}

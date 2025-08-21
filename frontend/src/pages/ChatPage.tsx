@@ -33,6 +33,8 @@ interface ChatResponse {
   data_preview?: DataPreview | null;
 }
 
+type ThreadItem = { thread_id: string; title?: string | null };
+
 export default function ChatPage() {
   const theme = useTheme();
   const isMobile = useMediaQuery('(max-width:900px)');
@@ -46,14 +48,20 @@ export default function ChatPage() {
   const [draftAnswer, setDraftAnswer] = React.useState<string>('');
   const [thoughts, setThoughts] = React.useState<string[]>([]);
   const [tools, setTools] = React.useState<Array<{ type: 'start' | 'end'; tool: string; payload?: any }>>([]);
+  const [lastUserMessage, setLastUserMessage] = React.useState<string>('');
 
   // Thread state
-  const [threads, setThreads] = React.useState<string[]>([]);
+  const [threads, setThreads] = React.useState<ThreadItem[]>([]);
   const [threadId, setThreadId] = React.useState<string | null>(null);
   const [threadsLoading, setThreadsLoading] = React.useState(false);
   const [threadsPanelOpen, setThreadsPanelOpen] = React.useState<boolean>(true);
   const [showScrollToBottom, setShowScrollToBottom] = React.useState<boolean>(false);
   const threadsFetchSeq = React.useRef(0);
+
+  const getThreadTitle = React.useCallback((t: ThreadItem) => {
+    const title = (t.title ? String(t.title) : '').trim();
+    return title || `Thread - ${t.thread_id.slice(0, 8)}`;
+  }, []);
 
   React.useEffect(() => {
     setThreadsPanelOpen(!isMobile);
@@ -93,6 +101,9 @@ export default function ChatPage() {
     const token = window.localStorage.getItem('klaris_jwt');
     if (!token) { setError('You are not logged in. Please login to continue.'); return; }
     if (!threadId) { setError('Create or select a thread to start chatting.'); return; }
+    // Clear the input immediately on send
+    setLastUserMessage(msg);
+    setMessage('');
     setLoading(true);
     try {
       const resp = await fetch(buildApiUrl('/api/v1/chat/stream'), {
@@ -143,11 +154,15 @@ export default function ChatPage() {
             const answer = String(data?.answer || '');
             const route = (data && data.route) ? data.route : null;
             const data_preview = (data && data.data_preview) ? data.data_preview : null;
+            console.log('Chat final event:', { answer, route, data_preview });
             setResult({ answer, route, data_preview } as ChatResponse);
           } else if (type === 'error') {
             setError(String(data || 'Stream error'));
           } else if (type === 'done') {
             setLoading(false);
+            // Refresh threads to pick up server-side auto-title
+            try { await fetchThreads(); } catch {}
+            try { window.dispatchEvent(new CustomEvent('chat:threads:changed', { detail: { type: 'updated', id: threadId } })); } catch {}
             return;
           }
         }
@@ -173,11 +188,20 @@ export default function ChatPage() {
       } as RequestInit);
       if (!resp.ok) return;
       const data = await resp.json();
-      const list = Array.isArray(data?.threads) ? data.threads as string[] : [];
+      let list: ThreadItem[] = [];
+      if (Array.isArray(data?.threads)) {
+        const arr: any[] = data.threads as any[];
+        if (arr.length > 0 && typeof arr[0] === 'object') {
+          list = arr.map((r: any) => ({ thread_id: String(r.thread_id), title: r?.title ?? null }));
+        } else {
+          list = (arr as string[]).map((id) => ({ thread_id: String(id), title: null }));
+        }
+      }
       if (seq === threadsFetchSeq.current) {
         setThreads(list);
         // If current threadId is gone, clear selection and navigate to /chat
-        if (threadId && !list.includes(threadId)) {
+        const ids = new Set(list.map((t) => t.thread_id));
+        if (threadId && !ids.has(threadId)) {
           setThreadId(null);
           navigate('/chat');
         }
@@ -331,16 +355,16 @@ export default function ChatPage() {
                       ) : (
                         <Box>
                           {threads.map((t) => (
-                            <Stack key={t} direction="row" alignItems="center" spacing={0.5} sx={{ mb: 0.5 }}>
+                            <Stack key={t.thread_id} direction="row" alignItems="center" spacing={0.5} sx={{ mb: 0.5 }}>
                               <Button
-                                variant={t === threadId ? 'contained' : 'text'}
+                                variant={t.thread_id === threadId ? 'contained' : 'text'}
                                 size="small"
-                                onClick={() => navigate(`/chat/${encodeURIComponent(t)}`)}
+                                onClick={() => navigate(`/chat/${encodeURIComponent(t.thread_id)}`)}
                                 sx={{ justifyContent: 'flex-start', textTransform: 'none', flex: 1, overflow: 'hidden' }}
                               >
-                                <Typography noWrap maxWidth={180} variant="caption">{t}</Typography>
+                                <Typography noWrap maxWidth={180} variant="caption">{getThreadTitle(t)}</Typography>
                               </Button>
-                              <IconButton size="small" color="error" onClick={() => deleteThreadById(t)}>
+                              <IconButton size="small" color="error" onClick={() => deleteThreadById(t.thread_id)}>
                                 <DeleteOutlineRounded fontSize="small" />
                               </IconButton>
                             </Stack>
@@ -372,56 +396,46 @@ export default function ChatPage() {
                 </Stack>
 
                 {/* Messages / Streaming area */}
-                {(draftAnswer || result || error || thoughts.length > 0 || tools.length > 0) ? (
+                {(lastUserMessage || draftAnswer || result || error || thoughts.length > 0 || tools.length > 0) ? (
                   <Box>
                     {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
-                    {/* Assistant streaming bubble */}
-                    {draftAnswer && (
+                    {/* User message bubble */}
+                    {lastUserMessage && (
                       <Box sx={{ display: 'flex', mb: 2, minWidth: 0 }}>
-                        <Paper elevation={0} sx={{ p: 2, borderRadius: 3, bgcolor: theme.palette.mode === 'light' ? 'rgba(25,118,210,0.06)' : 'rgba(255,255,255,0.04)', border: '1px solid', borderColor: 'divider', flex: 1, minWidth: 0, maxWidth: '100%' }}>
-                          <Typography variant="overline" sx={{ display: 'block', color: 'text.secondary', mb: 0.5 }}>
-                            Assistant is typing…
+                        <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, flex: 1, minWidth: 0, maxWidth: '100%', bgcolor: theme.palette.background.paper }}>
+                          <Typography variant="subtitle2" sx={{ mb: 1.5 }}>You</Typography>
+                          <Divider sx={{ mb: 1.5 }} />
+                          <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                            {lastUserMessage}
                           </Typography>
-                          <Box sx={{
-                            overflowX: 'auto',
-                            maxWidth: '100%',
-                            wordBreak: 'break-word',
-                            overflowWrap: 'anywhere',
-                            '& p': { m: 0 },
-                            '& pre': { p: 1, borderRadius: 1, overflow: 'auto', maxWidth: '100%', bgcolor: theme.palette.mode === 'light' ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.06)' },
-                            '& code': { whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
-                            '& table': { display: 'block', width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse' },
-                            '& th, & td': { border: `1px solid ${theme.palette.divider}`, padding: '4px 8px', verticalAlign: 'top', wordBreak: 'break-word', overflowWrap: 'anywhere', whiteSpace: 'normal' },
-                            '& img': { maxWidth: '100%', height: 'auto' }
-                          }}>
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                              {draftAnswer}
-                            </ReactMarkdown>
-                          </Box>
                         </Paper>
                       </Box>
                     )}
 
-                    {/* Final assistant answer */}
-                    {result?.answer && (
+                    {/* Assistant streaming bubble */}
+                    {draftAnswer && (
                       <Box sx={{ display: 'flex', mb: 2, minWidth: 0 }}>
-                        <Paper elevation={0} sx={{ p: 2, borderRadius: 3, bgcolor: theme.palette.mode === 'light' ? 'background.paper' : 'rgba(255,255,255,0.04)', border: '1px solid', borderColor: 'divider', flex: 1, minWidth: 0, maxWidth: '100%' }}>
-                          <Typography variant="subtitle1" gutterBottom>Answer</Typography>
+                        <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, flex: 1, minWidth: 0, maxWidth: '100%', bgcolor: theme.palette.background.paper }}>
+                          <Typography variant="subtitle2" sx={{ mb: 1.5 }}>
+                            Answer (streaming…)
+                          </Typography>
                           <Divider sx={{ mb: 1.5 }} />
                           <Box sx={{
                             overflowX: 'auto',
                             maxWidth: '100%',
                             wordBreak: 'break-word',
                             overflowWrap: 'anywhere',
+                            WebkitOverflowScrolling: 'touch',
+                            '& p': { m: 0 },
                             '& pre': { p: 1, borderRadius: 1, overflow: 'auto', maxWidth: '100%', bgcolor: theme.palette.mode === 'light' ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.06)' },
                             '& code': { whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
-                            '& table': { display: 'block', width: '100%', tableLayout: 'fixed', borderCollapse: 'collapse' },
-                            '& th, & td': { border: `1px solid ${theme.palette.divider}`, padding: '4px 8px', verticalAlign: 'top', wordBreak: 'break-word', overflowWrap: 'anywhere', whiteSpace: 'normal' },
+                            '& table': { display: 'block', width: 'max-content', maxWidth: 'none', minWidth: 640, borderCollapse: 'collapse', tableLayout: 'auto' },
+                            '& th, & td': { border: `1px solid ${theme.palette.divider}`, padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap', wordBreak: 'normal', overflowWrap: 'normal' },
                             '& img': { maxWidth: '100%', height: 'auto' }
                           }}>
                             <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                              {result.answer}
+                              {draftAnswer}
                             </ReactMarkdown>
                           </Box>
                         </Paper>
@@ -460,34 +474,6 @@ export default function ChatPage() {
                             </Typography>
                           ))}
                         </Box>
-                      </Paper>
-                    )}
-
-                    {/* Data preview */}
-                    {result?.data_preview && result.data_preview.columns?.length > 0 && (
-                      <Paper variant="outlined" sx={{ p: 2, borderRadius: 3 }}>
-                        <Typography variant="subtitle2" gutterBottom>Data Preview</Typography>
-                        <Divider sx={{ mb: 2 }} />
-                        <TableContainer sx={{ overflowX: 'auto', maxWidth: '100%' }}>
-                          <Table size="small" sx={{ minWidth: 640, tableLayout: 'auto' }}>
-                            <TableHead>
-                              <TableRow>
-                                {result.data_preview.columns.map((c, idx) => (
-                                  <TableCell key={idx}>{c}</TableCell>
-                                ))}
-                              </TableRow>
-                            </TableHead>
-                            <TableBody>
-                              {result.data_preview.rows.map((r, rIdx) => (
-                                <TableRow key={rIdx}>
-                                  {r.map((v, cIdx) => (
-                                    <TableCell key={cIdx}>{String(v)}</TableCell>
-                                  ))}
-                                </TableRow>
-                              ))}
-                            </TableBody>
-                          </Table>
-                        </TableContainer>
                       </Paper>
                     )}
                   </Box>

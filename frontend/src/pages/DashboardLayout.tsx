@@ -45,6 +45,8 @@ const mainMenu = [
   { key: "chat", label: "Chat", path: "/chat", icon: <ChatIcon fontSize="small" /> }
 ];
 
+type ThreadItem = { thread_id: string; title?: string | null };
+
 export default function DashboardLayout() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -62,12 +64,17 @@ export default function DashboardLayout() {
   const { mode, toggleMode } = React.useContext(ModeContext);
 
   const [chatExpanded, setChatExpanded] = React.useState(true);
-  const [threads, setThreads] = React.useState<string[]>([]);
+  const [threads, setThreads] = React.useState<ThreadItem[]>([]);
   const [threadsLoading, setThreadsLoading] = React.useState(false);
   const threadsFetchSeq = React.useRef(0);
   const currentThreadId = location.pathname.startsWith('/chat/')
     ? decodeURIComponent(location.pathname.slice('/chat/'.length))
     : null;
+
+  const getThreadTitle = React.useCallback((t: ThreadItem) => {
+    const title = (t.title ? String(t.title) : '').trim();
+    return title || `Thread - ${t.thread_id.slice(0, 8)}`;
+  }, []);
 
   const handleLogout = () => {
     window.localStorage.removeItem("klaris_jwt");
@@ -88,7 +95,15 @@ export default function DashboardLayout() {
       } as RequestInit);
       if (!resp.ok) return;
       const data = await resp.json();
-      const list = Array.isArray(data?.threads) ? (data.threads as string[]) : [];
+      let list: ThreadItem[] = [];
+      if (Array.isArray(data?.threads)) {
+        const arr: any[] = data.threads as any[];
+        if (arr.length > 0 && typeof arr[0] === 'object') {
+          list = arr.map((r: any) => ({ thread_id: String(r.thread_id), title: r?.title ?? null }));
+        } else {
+          list = (arr as string[]).map((id) => ({ thread_id: String(id), title: null }));
+        }
+      }
       if (seq === threadsFetchSeq.current) setThreads(list);
     } finally {
       if (seq === threadsFetchSeq.current) setThreadsLoading(false);
@@ -99,7 +114,9 @@ export default function DashboardLayout() {
 
   // Refresh threads in sidebar when ChatPage creates/deletes threads
   React.useEffect(() => {
-    const onChanged = () => { fetchThreads(); };
+    const onChanged = (ev: Event) => {
+      fetchThreads();
+    };
     window.addEventListener('chat:threads:changed', onChanged as any);
     return () => window.removeEventListener('chat:threads:changed', onChanged as any);
   }, [fetchThreads]);
@@ -191,15 +208,15 @@ export default function DashboardLayout() {
                       <Typography variant="caption" color="text.secondary">No threads</Typography>
                     ) : (
                       threads.map((t) => (
-                        <Box key={t} sx={{ display: 'flex', alignItems: 'center' }}>
+                        <Box key={t.thread_id} sx={{ display: 'flex', alignItems: 'center' }}>
                           <ListItemButton
-                            selected={currentThreadId === t}
-                            onClick={() => { navigate(`/chat/${encodeURIComponent(t)}`); setMobileOpen(false); }}
+                            selected={currentThreadId === t.thread_id}
+                            onClick={() => { navigate(`/chat/${encodeURIComponent(t.thread_id)}`); setMobileOpen(false); }}
                             sx={{ borderRadius: 1 }}
                           >
-                            <ListItemText primaryTypographyProps={{ noWrap: true }} primary={t} />
+                            <ListItemText primaryTypographyProps={{ noWrap: true }} primary={getThreadTitle(t)} />
                           </ListItemButton>
-                          <IconButton size="small" color="error" onClick={() => deleteThreadById(t)}>
+                          <IconButton size="small" color="error" onClick={() => deleteThreadById(t.thread_id)}>
                             <DeleteOutlineRounded fontSize="small" />
                           </IconButton>
                         </Box>
