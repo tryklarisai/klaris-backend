@@ -21,15 +21,14 @@ function App() {
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/" element={<DashboardLayout />}>
-              <Route index element={<DashboardPage />} />
-              <Route path="dashboard" element={<DashboardPage />} />
+              <Route index element={<Navigate to="/connectors" replace />} />
               <Route path="connectors" element={<ConnectorsPage />} />
               <Route path="connectors/:connectorId" element={<ConnectorDetailPage />} />
               <Route path="relationships" element={<DataRelationshipsPage />} />
               <Route path="business-context" element={<BusinessContextPage />} />
               <Route path="chat" element={<ChatPage />} />
             </Route>
-            <Route path="*" element={<Navigate to="/dashboard" replace />} />
+            <Route path="*" element={<Navigate to="/connectors" replace />} />
           </Routes>
         </Router>
       </SnackbarProvider>

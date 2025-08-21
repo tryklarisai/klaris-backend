@@ -161,7 +161,6 @@ export default function BusinessContextPage() {
 
   return (
     <Box>
-      <Typography variant="h5" sx={{ mb: 2 }}>Business Context</Typography>
       <Accordion defaultExpanded>
         <AccordionSummary expandIcon={<ExpandMoreIcon />}>Sources</AccordionSummary>
         <AccordionDetails>

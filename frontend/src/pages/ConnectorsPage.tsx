@@ -239,8 +239,7 @@ export default function ConnectorsPage() {
   ];
 
   return (
-    <Box sx={{ mt: 7 }}>
-      <Typography variant="h4" sx={{ mb: 3 }}>Connectors</Typography>
+    <Box>
       
       {/* New Connector Section */}
       <Box sx={{ mb: 4 }}>

@@ -542,7 +542,6 @@ export default function DataRelationshipsPage() {
 
   return (
     <Box>
-      <Typography variant="h5" sx={{ mb: 2 }}>Data Relationships</Typography>
       {loading ? <CircularProgress /> : error ? <Alert severity="error">{error}</Alert> : (
         <>
           <Accordion defaultExpanded>
