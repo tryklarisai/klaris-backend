@@ -12,6 +12,7 @@ import { SnackbarContext } from '../ui/SnackbarProvider';
 import { buildApiUrl, config } from '../config';
 import GoogleDrivePicker, { GoogleDriveFile } from '../components/GoogleDrivePicker';
 import { GOOGLE_DRIVE_MIME_TYPES } from '../utils/googlePicker';
+import { formatLocalDatetime } from '../utils/date';
 
 const API_URL = buildApiUrl('');
 
@@ -352,14 +353,16 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                 </Box>
                 <Box>
                   <Typography variant="caption" color="text.secondary">Status</Typography>
-                  <Chip size="small" label={data.status} color={data.status === 'active' ? 'success' : 'error'} />
+                  <Typography variant="body2">
+                    <Chip size="small" label={data.status} color={data.status === 'active' ? 'success' : 'error'} />
+                  </Typography>
                 </Box>
                 <Box>
                   <Typography variant="caption" color="text.secondary">Last Schema Fetch</Typography>
                   <Typography variant="body2">
                     {data.last_schema_fetch ? (
-                      <Tooltip title={new Date(data.last_schema_fetch).toLocaleString()}>
-                        <span>{new Date(data.last_schema_fetch).toLocaleString()}</span>
+                      <Tooltip title={formatLocalDatetime(data.last_schema_fetch)}>
+                        <span>{formatLocalDatetime(data.last_schema_fetch)}</span>
                       </Tooltip>
                     ) : 'Never'}
                   </Typography>
@@ -390,7 +393,7 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                     {fetchingSchema ? 'Refreshing…' : 'Refresh Schema'}
                   </Button>
                   <Typography variant="body2" color="text.secondary">
-                    Last fetched: {data.last_schema_fetch ? new Date(data.last_schema_fetch).toLocaleString() : 'Never'}
+                    Last fetched: {data.last_schema_fetch ? formatLocalDatetime(data.last_schema_fetch) : 'Never'}
                   </Typography>
                   <Box sx={{ flex: 1 }} />
                   <TextField

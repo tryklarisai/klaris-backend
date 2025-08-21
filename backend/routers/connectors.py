@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from uuid import UUID
 from typing import Optional
 from datetime import datetime
+from sqlalchemy.exc import IntegrityError
 
 from models.connector import Connector, ConnectorStatus
 from models.tenant import Tenant
@@ -24,6 +25,31 @@ from fastapi.responses import RedirectResponse
 
 import requests
 from uuid import UUID
+
+def check_connector_name_uniqueness(db: Session, tenant_id: str, name: str, exclude_connector_id: str = None) -> None:
+    """
+    Check if connector name is unique within tenant scope.
+    Raises HTTPException if name already exists.
+    
+    Args:
+        db: Database session
+        tenant_id: Tenant ID to check within
+        name: Connector name to check
+        exclude_connector_id: Optional connector ID to exclude from check (for updates)
+    """
+    if not name or not name.strip():
+        return  # Empty/null names are allowed and don't need uniqueness check
+    
+    query = db.query(Connector).filter_by(tenant_id=tenant_id, name=name.strip())
+    if exclude_connector_id:
+        query = query.filter(Connector.connector_id != exclude_connector_id)
+    
+    existing = query.first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, 
+            detail=f"A connector with the name '{name.strip()}' already exists. Please choose a different name."
+        )
 
 def make_json_safe(obj):
     """
@@ -171,12 +197,17 @@ def google_drive_callback(request: Request, db: Session = Depends(get_db)):
     expiry = datetime.utcnow() + timedelta(seconds=expires_in) if expires_in else None
     if not access_token or not refresh_token:
         raise HTTPException(status_code=400, detail="Did not receive access/refresh token from Google.")
+    
+    # Check connector name uniqueness
+    if connector_name:
+        check_connector_name_uniqueness(db, tenant_id, connector_name)
+    
     # Store a new Connector in DB (status=ACTIVE)
     now = datetime.utcnow()
     connector = Connector(
         connector_id=uuid4(),
         tenant_id=tenant_id,
-        name=connector_name if connector_name else None,
+        name=connector_name.strip() if connector_name else None,
         type=ConnectorType.GOOGLE_DRIVE.value,
         config={
             # Don't persist access_token beyond expiry; refresh_token is for renewals
@@ -190,7 +221,17 @@ def google_drive_callback(request: Request, db: Session = Depends(get_db)):
         last_schema_fetch=None # will be fetched in MCP step
     )
     db.add(connector)
-    db.commit()
+    
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if 'uq_connector_name_per_tenant' in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A connector with the name '{connector_name}' already exists. Please choose a different name."
+            )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Database constraint violation")
     # Redirect to the connector detail page for file selection and naming
     # FRONTEND_URL is expected to be just the host (e.g., https://demo.tryklaris.ai)
     base = os.getenv("FRONTEND_URL", "http://localhost:3000")
@@ -347,10 +388,13 @@ def create_connector(
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
+    # Check connector name uniqueness
+    check_connector_name_uniqueness(db, str(tenant_id), request.name)
+
     now = datetime.utcnow()
     connector = Connector(
         tenant_id=str(tenant_id),
-        name=request.name,
+        name=request.name.strip() if request.name else None,
         type=request.type.value,
         config=request.config,
         status=ConnectorStatus.FAILED,  # pessimistic by default
@@ -387,7 +431,17 @@ def create_connector(
             connector.status = ConnectorStatus.FAILED
             connector.error_message = f"Connection failed: {str(e)}"
     
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if 'uq_connector_name_per_tenant' in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A connector with the name '{request.name}' already exists. Please choose a different name."
+            )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Database constraint violation")
+    
     return ConnectorCreateResponse(
         connector_id=connector.connector_id,
         status=connector.status.value,
@@ -557,14 +611,31 @@ def update_connector(
     connector = db.query(Connector).filter_by(tenant_id=tenant_id, connector_id=connector_id).first()
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
+    
+    # Check name uniqueness if name is being updated
+    if hasattr(request, 'name') and request.name and request.name != connector.name:
+        check_connector_name_uniqueness(db, tenant_id, request.name, connector_id)
+    
     connector.type = request.type.value
     # Merge old config with new keys (for partial update flexibility)
     old_config = dict(connector.config or {})
     next_config = dict(request.config or {})
     old_config.update(next_config)  # Partial update: merge new keys/values into existing
     connector.config = old_config
+    if hasattr(request, 'name') and request.name:
+        connector.name = request.name.strip()
     connector.updated_at = datetime.utcnow()
-    db.commit()
+    
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if 'uq_connector_name_per_tenant' in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A connector with the name '{request.name}' already exists. Please choose a different name."
+            )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Database constraint violation")
     last_schema = db.query(Schema).filter_by(
         connector_id=connector.connector_id
     ).order_by(Schema.fetched_at.desc()).first()
@@ -616,16 +687,34 @@ def patch_connector(
     connector = db.query(Connector).filter_by(tenant_id=tenant_id, connector_id=connector_id).first()
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
+    
+    # Check name uniqueness if name is being updated
+    if 'name' in patch_data and patch_data['name'] and patch_data['name'] != connector.name:
+        check_connector_name_uniqueness(db, tenant_id, patch_data['name'], connector_id)
+    
     allowed_fields = ["connector_metadata", "config", "status", "type", "name"]
     made_update = False
     for key in allowed_fields:
         if key in patch_data and patch_data[key] is not None:
-            setattr(connector, key, patch_data[key])
+            if key == 'name':
+                setattr(connector, key, patch_data[key].strip())
+            else:
+                setattr(connector, key, patch_data[key])
             made_update = True
     if not made_update:
         raise HTTPException(status_code=400, detail="No updatable fields present in patch body.")
     connector.updated_at = datetime.utcnow()
-    db.commit()
+    
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if 'uq_connector_name_per_tenant' in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A connector with the name '{patch_data.get('name', '')}' already exists. Please choose a different name."
+            )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Database constraint violation")
     last_schema = db.query(Schema).filter_by(
         connector_id=connector.connector_id
     ).order_by(Schema.fetched_at.desc()).first()

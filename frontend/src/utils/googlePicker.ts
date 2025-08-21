@@ -224,19 +224,25 @@ export const showGoogleDrivePicker = (
       }
     });
 
-    // Enable multiselect if needed
+    // Always enable multiselect if requested, with robust fallback
     if (options.multiselect) {
+      let multiselectEnabled = false;
       try {
-        // Use Google's MULTISELECT_ENABLED feature
         picker.enableFeature(window.google.picker.Feature.MULTISELECT_ENABLED);
+        multiselectEnabled = true;
       } catch (error) {
-        console.warn('Multiselect feature may not be available:', error);
-        // Fallback to numeric constant if Feature enum is not available
+        console.warn('MULTISELECT_ENABLED feature not available via enum:', error);
+      }
+      if (!multiselectEnabled) {
         try {
-          picker.enableFeature(1);
+          picker.enableFeature(1); // Fallback: 1 is the documented constant for multiselect
+          multiselectEnabled = true;
         } catch (fallbackError) {
           console.warn('Multiselect fallback also failed:', fallbackError);
         }
+      }
+      if (!multiselectEnabled) {
+        console.warn('Google Picker multiselect could not be enabled. Only single file selection may be available.');
       }
     }
 

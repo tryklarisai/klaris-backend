@@ -5,7 +5,7 @@ Production-grade: type-safe, linted, SQLAlchemy 2.0+ ORM style.
 from __future__ import annotations
 from typing import Any
 import uuid
-from sqlalchemy import Column, String, Enum, DateTime, ForeignKey, Text
+from sqlalchemy import Column, String, Enum, DateTime, ForeignKey, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from datetime import datetime
@@ -18,6 +18,9 @@ class ConnectorStatus(PyEnum):
 
 class Connector(Base):
     __tablename__ = "connectors"
+    __table_args__ = (
+        UniqueConstraint('tenant_id', 'name', name='uq_connector_name_per_tenant'),
+    )
 
     connector_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, unique=True, nullable=False

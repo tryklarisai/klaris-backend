@@ -5,13 +5,13 @@ import {
 import DeleteIcon from '@mui/icons-material/Delete';
 // Avoid Grid to reduce typings complexity in modal; simple Box layout instead
 import { LoadingButton } from '@mui/lab';
-import { DataGrid, GridColDef, GridRowParams } from '@mui/x-data-grid';
+import { DataGrid, GridColDef } from '@mui/x-data-grid';
 import { useNavigate } from 'react-router-dom';
 import { buildApiUrl } from '../config';
 import { ReactComponent as GoogleDriveSvg } from '../assets/connectors/google-drive.svg';
 import { ReactComponent as PostgresSvg } from '../assets/connectors/postgres.svg';
 import Tooltip from '@mui/material/Tooltip';
-import { formatRelativeTime, formatLocalDatetime } from '../utils/date';
+import { formatLocalDatetime } from '../utils/date';
 
 const API_URL = buildApiUrl('');
 
@@ -157,39 +157,76 @@ export default function ConnectorsPage() {
   };
 
   const columns: GridColDef[] = [
-    { field: 'name', headerName: 'Name', flex: 1, minWidth: 160, renderCell: ({ value, row }) => value || `${row.type} Connector` },
-    { field: 'type', headerName: 'Type', width: 120 },
-    { field: 'status', headerName: 'Status', width: 100, renderCell: ({ value }) => (<Chip label={value} color={value === 'active' ? 'success' : 'default'} size="small" />) },
+    { 
+      field: 'name', 
+      headerName: 'Name', 
+      flex: 1,
+      minWidth: 200,
+      renderCell: (params: any) => (
+        <Tooltip title={params.value || `${params.row.type} Connector`}>
+          <Box sx={{ 
+            overflow: 'hidden', 
+            textOverflow: 'ellipsis', 
+            whiteSpace: 'nowrap',
+            width: '100%'
+          }}>
+            {params.value || `${params.row.type} Connector`}
+          </Box>
+        </Tooltip>
+      )
+    },
+    { 
+      field: 'type', 
+      headerName: 'Type', 
+      width: 110,
+      renderCell: (params: any) => (
+        <Box sx={{ textTransform: 'capitalize' }}>
+          {params.value?.replace('_', ' ') || '—'}
+        </Box>
+      )
+    },
+    { 
+      field: 'status', 
+      headerName: 'Status', 
+      width: 90, 
+      renderCell: (params: any) => (
+        <Chip 
+          label={params.value} 
+          color={params.value === 'active' ? 'success' : params.value === 'failed' ? 'error' : 'default'} 
+          size="small" 
+        />
+      ) 
+    },
     {
       field: 'created_at',
       headerName: 'Created',
-      width: 150,
-      renderCell: (params) => params.value ? (
+      width: 180,
+      renderCell: (params: any) => params.value ? (
         <Tooltip title={formatLocalDatetime(params.value)}>
-          <Chip size="small" variant="outlined" label={formatRelativeTime(params.value)} />
+          <Chip size="small" variant="outlined" label={formatLocalDatetime(params.value)} />
         </Tooltip>
-      ) : <Chip size="small" variant="outlined" label="—" />,
+      ) : <Chip size="small" variant="outlined" label="—" />, 
     },
     {
       field: 'last_schema_fetch',
       headerName: 'Last Schema Fetch',
-      width: 160,
+      width: 180,
       renderCell: (params) => params.value ? (
         <Tooltip title={formatLocalDatetime(params.value)}>
-          <Chip size="small" variant="outlined" label={formatRelativeTime(params.value)} />
+          <Chip size="small" variant="outlined" label={formatLocalDatetime(params.value)} />
         </Tooltip>
-      ) : <Chip size="small" variant="outlined" label="Never" />,
+      ) : <Chip size="small" variant="outlined" label="Never" />, 
     },
     {
       field: 'actions',
       headerName: 'Actions',
-      width: 80,
+      width: 70,
       sortable: false,
-      renderCell: (params) => (
+  renderCell: (params: { row: Connector }) => (
         <IconButton
           size="small"
           onClick={(e) => {
-            e.stopPropagation(); // Prevent row click navigation
+            (e as React.MouseEvent).stopPropagation(); // Prevent row click navigation
             setConnectorToDelete(params.row);
             setDeleteDialogOpen(true);
           }}
@@ -223,7 +260,7 @@ export default function ConnectorsPage() {
             fullWidth
             margin="normal"
             value={googleDriveName}
-            onChange={e => setGoogleDriveName(e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setGoogleDriveName(e.target.value)}
             required
           />
           {googleDriveErr && <Alert severity="error" sx={{ mt: 1 }}>{googleDriveErr}</Alert>}
@@ -301,19 +338,25 @@ export default function ConnectorsPage() {
       </Box>
 
       {/* Your Connectors Section */}
-      <Box>
+      <Box sx={{ mt: 4 }}>
         <Typography variant="h6" mb={2}>Your Connectors</Typography>
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-        <div style={{ height: 400, width: '100%' }}>
+        <Box sx={{ width: '100%', minWidth: 0 }}>
           <DataGrid
-            getRowId={(row) => row.connector_id}
+            getRowId={(row: Connector) => row.connector_id}
             rows={connectors}
-            columns={columns}
+            columns={columns.map(col => ({ ...col, align: 'left', headerAlign: 'left' }))}
             loading={loading}
             disableRowSelectionOnClick
             onRowClick={(params: any) => navigate(`/connectors/${params.id}`)}
+            autoHeight
+            initialState={{
+              pagination: { paginationModel: { pageSize: 10 } }
+            }}
+            pageSizeOptions={[10, 25, 50, 100]}
+            sx={{ '& .MuiDataGrid-columnHeaders': { backgroundColor: 'background.paper' }, fontSize: 14 }}
           />
-        </div>
+        </Box>
       </Box>
 
       {/* Postgres Form Dialog */}
@@ -329,7 +372,7 @@ export default function ConnectorsPage() {
                   fullWidth
                   margin="normal"
                   value={form.name}
-                  onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm((f: typeof form) => ({ ...f, name: e.target.value }))}
                 />
                 <TextField
                   label="user"
@@ -337,7 +380,7 @@ export default function ConnectorsPage() {
                   fullWidth
                   margin="normal"
                   value={form.user}
-                  onChange={e => setForm(f => ({ ...f, user: e.target.value }))}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm((f: typeof form) => ({ ...f, user: e.target.value }))}
                   required
                 />
                 <TextField
@@ -347,7 +390,7 @@ export default function ConnectorsPage() {
                   fullWidth
                   margin="normal"
                   value={form.password}
-                  onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm((f: typeof form) => ({ ...f, password: e.target.value }))}
                   required
                 />
                 <TextField
@@ -356,7 +399,7 @@ export default function ConnectorsPage() {
                   fullWidth
                   margin="normal"
                   value={form.host}
-                  onChange={e => setForm(f => ({ ...f, host: e.target.value }))}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm((f: typeof form) => ({ ...f, host: e.target.value }))}
                   required
                 />
                 <TextField
@@ -366,7 +409,7 @@ export default function ConnectorsPage() {
                   fullWidth
                   margin="normal"
                   value={form.port}
-                  onChange={e => setForm(f => ({ ...f, port: e.target.value }))}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm((f: typeof form) => ({ ...f, port: e.target.value }))}
                 />
                 <TextField
                   label="database"
@@ -374,7 +417,7 @@ export default function ConnectorsPage() {
                   fullWidth
                   margin="normal"
                   value={form.database}
-                  onChange={e => setForm(f => ({ ...f, database: e.target.value }))}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm((f: typeof form) => ({ ...f, database: e.target.value }))}
                   required
                 />
                 <TextField
@@ -383,7 +426,7 @@ export default function ConnectorsPage() {
                   fullWidth
                   margin="normal"
                   value={form.mfa_type}
-                  onChange={e => setForm(f => ({ ...f, mfa_type: e.target.value }))}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm((f: typeof form) => ({ ...f, mfa_type: e.target.value }))}
                 >
                   <MenuItem value="">None</MenuItem>
                   <MenuItem value="sms">SMS</MenuItem>
