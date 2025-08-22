@@ -9,8 +9,8 @@ import DashboardPage from "./pages/DashboardPage";
 import ConnectorsPage from "./pages/ConnectorsPage";
 import ConnectorDetailPage from "./pages/ConnectorDetailPage";
 import DataRelationshipsPage from "./pages/DataRelationshipsPage";
-import BusinessContextPage from "./pages/BusinessContextPage";
 import ChatPage from "./pages/ChatPage";
+import BclPage from "./pages/BclPage";
 
 function App() {
   return (
@@ -26,7 +26,7 @@ function App() {
               <Route path="connectors" element={<ConnectorsPage />} />
               <Route path="connectors/:connectorId" element={<ConnectorDetailPage />} />
               <Route path="relationships" element={<DataRelationshipsPage />} />
-              <Route path="business-context" element={<BusinessContextPage />} />
+              <Route path="bcl" element={<BclPage />} />
               <Route path="chat" element={<ChatPage />} />
               <Route path="chat/:threadId" element={<ChatPage />} />
             </Route>

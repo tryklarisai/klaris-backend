@@ -23,7 +23,7 @@ import MenuIcon from '@mui/icons-material/Menu';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import ExtensionIcon from '@mui/icons-material/Extension';
 import SchemaIcon from '@mui/icons-material/Hub';
-import WorkIcon from '@mui/icons-material/WorkOutline';
+import LibraryBooksIcon from '@mui/icons-material/LibraryBooks';
 import LogoutIcon from '@mui/icons-material/Logout';
 import Brightness4Icon from '@mui/icons-material/Brightness4';
 import Brightness7Icon from '@mui/icons-material/Brightness7';
@@ -41,7 +41,7 @@ const mainMenu = [
   { key: "dashboard", label: "Dashboard", path: "/", icon: <DashboardIcon fontSize="small" /> },
   { key: "connectors", label: "Connectors", path: "/connectors", icon: <ExtensionIcon fontSize="small" /> },
   { key: "relationships", label: "Data Relationships", path: "/relationships", icon: <SchemaIcon fontSize="small" /> },
-  { key: "business-context", label: "Business Context", path: "/business-context", icon: <WorkIcon fontSize="small" /> },
+  { key: "bcl", label: "Business Context", path: "/bcl", icon: <LibraryBooksIcon fontSize="small" /> },
   { key: "chat", label: "Chat", path: "/chat", icon: <ChatIcon fontSize="small" /> }
 ];
 
@@ -55,8 +55,8 @@ export default function DashboardLayout() {
     if (p === '/' || p.startsWith('/dashboard')) return 'dashboard';
     if (p.startsWith('/connectors')) return 'connectors';
     if (p.startsWith('/relationships')) return 'relationships';
-    if (p.startsWith('/business-context')) return 'business-context';
     if (p.startsWith('/chat')) return 'chat';
+    if (p.startsWith('/bcl')) return 'bcl';
     return 'dashboard';
   }, [location.pathname]);
   const isMobile = useMediaQuery('(max-width:900px)');
