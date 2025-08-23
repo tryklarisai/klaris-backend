@@ -19,6 +19,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain.callbacks.base import BaseCallbackHandler
 from .tools import make_generic_tools
 from pgvector.sqlalchemy import Vector
 from services.embeddings import get_embeddings_client_for_tenant
@@ -94,7 +95,7 @@ def _make_llm_for_tenant(db: Session, tenant_id: UUID):
             streaming=True,
             api_key=api_key,
             base_url=base_url,
-            model_kwargs={"stream_options": {"include_usage": True}},
+            stream_usage=True,
         )
     elif provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
@@ -576,11 +577,6 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
         "glossary_context": glossary_ctx,
     }
 
-    try:
-        logger.info("BCL: Chat Payload %s", json.dumps(payload, ensure_ascii=False))
-    except Exception:
-        logger.info("BCL: Chat Payload %s", str(payload))
-
     context_json = json.dumps(payload)
     prompt = ChatPromptTemplate.from_messages([
         ("system", agent_instructions),
@@ -626,12 +622,63 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
     usage_output = 0
     usage_total = 0
 
+    class _UsageCapture(BaseCallbackHandler):
+        def __init__(self) -> None:
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.total_tokens = 0
+
+        def on_chat_model_end(self, response, **kwargs):  # type: ignore[override]
+            try:
+                usage = None
+                
+                # OpenAI via LangChain often exposes token counts here
+                usage = getattr(response, "usage_metadata", None)
+                if not usage:
+                    gens = getattr(response, "generations", None)
+                    if gens and len(gens) > 0 and len(gens[0]) > 0:
+                        gi = getattr(gens[0][0], "generation_info", None) or {}
+                        usage = gi.get("usage") or gi.get("token_usage") or gi
+                if not usage:
+                    lo = getattr(response, "llm_output", None) or {}
+                    if isinstance(lo, dict):
+                        usage = lo.get("token_usage") or lo.get("usage")
+                if isinstance(usage, dict):
+                    pi = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+                    co = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+                    tt = int(usage.get("total_tokens") or (pi + co))
+                    self.input_tokens += pi
+                    self.output_tokens += co
+                    self.total_tokens += tt
+            except Exception:
+                pass
+
+        def on_llm_end(self, response, **kwargs):  # type: ignore[override]
+            # Fallback for non-chat models
+            try:
+                usage = getattr(response, "usage_metadata", None)
+                if not usage:
+                    lo = getattr(response, "llm_output", None) or {}
+                    if isinstance(lo, dict):
+                        usage = lo.get("token_usage") or lo.get("usage")
+                if isinstance(usage, dict):
+                    pi = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+                    co = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+                    tt = int(usage.get("total_tokens") or (pi + co))
+                    self.input_tokens += pi
+                    self.output_tokens += co
+                    self.total_tokens += tt
+            except Exception:
+                pass
+
+    usage_cb = _UsageCapture()
+
     try:
         # Send an initial event to prompt clients to render immediately
         yield "event: ready\ndata: {}\n\n"
         async for ev in runnable.astream_events(
             {"input": message, "context": context_json},
-            config={"configurable": {"session_id": session_id}},
+            config={"configurable": {"session_id": session_id}, "callbacks": [usage_cb]},
             version="v2",
         ):
             etype = ev.get("event")
@@ -686,10 +733,46 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
                 try:
                     usage = None
                     if isinstance(data, dict):
-                        usage = data.get("usage") or data.get("generation_info", {}).get("usage")
-                        resp = data.get("response") or {}
-                        if not usage and isinstance(resp, dict):
-                            usage = resp.get("usage")
+                        # Prefer direct usage fields present in OpenAI stream end
+                        usage = (
+                            data.get("usage")
+                            or data.get("usage_metadata")
+                            or data.get("generation_info", {}).get("usage")
+                        )
+                        if not usage:
+                            resp = data.get("response") or {}
+                            if isinstance(resp, dict):
+                                usage = resp.get("usage") or resp.get("usage_metadata")
+                        # Fallback: parse from stringified output if present
+                        if not usage:
+                            try:
+                                out_s = str(data.get("output") or "")
+                                idx = out_s.find("usage_metadata=")
+                                if idx != -1:
+                                    start = idx + len("usage_metadata=")
+                                    # capture balanced braces
+                                    depth = 0
+                                    j = start
+                                    started = False
+                                    while j < len(out_s):
+                                        ch = out_s[j]
+                                        if ch == '{':
+                                            depth += 1
+                                            started = True
+                                        elif ch == '}':
+                                            depth -= 1
+                                            if started and depth == 0:
+                                                j += 1
+                                                break
+                                        j += 1
+                                    blob = out_s[start:j]
+                                    # Safely evaluate python-literal dict
+                                    import ast
+                                    parsed = ast.literal_eval(blob)
+                                    if isinstance(parsed, dict):
+                                        usage = parsed
+                            except Exception:
+                                pass
                     if isinstance(usage, dict):
                         pi = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
                         co = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
@@ -733,9 +816,9 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
                 model=model,
                 operation="chat",
                 category="chat",
-                input_tokens=int(usage_input) if usage_input else None,
-                output_tokens=int(usage_output) if usage_output else None,
-                total_tokens=int(usage_total) if usage_total else None,
+                input_tokens=int(usage_cb.input_tokens or usage_input) if (usage_cb.input_tokens or usage_input) else None,
+                output_tokens=int(usage_cb.output_tokens or usage_output) if (usage_cb.output_tokens or usage_output) else None,
+                total_tokens=int(usage_cb.total_tokens or usage_total) if (usage_cb.total_tokens or usage_total) else None,
                 request_id=None,
                 thread_id=str(thread_id) if isinstance(thread_id, str) else None,
                 route=route_str,

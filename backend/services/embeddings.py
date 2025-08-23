@@ -79,6 +79,7 @@ def embed_and_log(db: Session, tenant_id: str, texts: List[str], category: str |
     t0 = time.time()
     try:
         vectors = client.embed(texts)
+        logger.info("BCL: Embedding Payload %s", json.dumps(vectors.usage))
     finally:
         # Best-effort logging with minimal fields
         try:
