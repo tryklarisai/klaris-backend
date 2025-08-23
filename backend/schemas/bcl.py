@@ -59,6 +59,17 @@ class ImportGlossaryResponse(BaseModel):
     rows_processed: int
 
 
+class GlossaryTermRead(BaseModel):
+    term_id: str
+    term: str
+    description: str | None = None
+
+
+class GlossaryUpdateRequest(BaseModel):
+    term: Optional[str] = None
+    description: Optional[str] = None
+
+
 class CreateMappingRequest(BaseModel):
     target_kind: str
     entity_name: str | None = None

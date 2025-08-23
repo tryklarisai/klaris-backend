@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from typing import Any, List
-from uuid import UUID
-from datetime import datetime
+from uuid import UUID as _UUID
 import os
 import io
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 from sqlalchemy import text, bindparam
@@ -14,27 +13,15 @@ from sqlalchemy.orm import Session
 
 from db import get_db
 from schemas.bcl import (
-    DocumentUploadResponse,
-    GroundRequest,
-    GroundResponse,
-    TermRead,
-    EvidenceSnippet,
     ImportGlossaryResponse,
-    CreateMappingRequest,
-    MappingUpdateRequest,
-    TermMappingRead,
-    ProposeMappingsResponse,
-    ProposalRead,
-    ListProposalsResponse,
-    AcceptRejectResponse,
+    GlossaryTermRead,
+    GlossaryUpdateRequest,
 )
-from services.bcl_ingestion import ingest_document
-from models.bcl import BclDocument, BclChunk, BclTerm, BclTermAlias, BclTermMapping, BclMappingProposal
+from models.bcl import BclTerm
 from pgvector.sqlalchemy import Vector
-from services.bcl_proposer import propose_mappings_for_all_terms
 
 
-router = APIRouter(prefix="/api/v1/bcl", tags=["BCL"])
+router = APIRouter(prefix="/api/v1/bcl", tags=["Glossary"])
 
 
 # --- Auth helper: accept JWT or dev API key ---
@@ -99,23 +86,7 @@ def api_key_or_bearer(request: Request, credentials: HTTPAuthorizationCredential
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
 
-@router.post("/documents/upload", response_model=DocumentUploadResponse)
-async def upload_document(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    auth: AuthContext = Depends(api_key_or_bearer),
-) -> DocumentUploadResponse:
-    content = await file.read()
-    uri = f"upload://{file.filename}"
-    result = ingest_document(
-        db,
-        auth.tenant_id,
-        uri=uri,
-        filename=file.filename,
-        mime_type=file.content_type,
-        content=content,
-    )
-    return DocumentUploadResponse(**result)
+# Removed document upload; glossary-only
 
 
 def _normalize_term(value: str) -> str:
@@ -132,7 +103,7 @@ async def import_glossary(
     bytes_data = await file.read()
     rows_processed = 0
     terms_upserted = 0
-    aliases_created = 0
+    aliases_created = 0  # kept in response for backward-compat; remains 0 in glossary-only
 
     # Read CSV/XLSX
     if file.filename and file.filename.lower().endswith(".csv"):
@@ -146,7 +117,6 @@ async def import_glossary(
         rows_processed += 1
         term = str(row.get("Term") or row.get("term") or "").strip()
         desc = str(row.get("Description") or row.get("description") or "").strip()
-        aliases = str(row.get("Aliases") or row.get("aliases") or "").strip()
         if not term:
             continue
         norm = _normalize_term(term)
@@ -166,303 +136,137 @@ async def import_glossary(
                 term=term,
                 normalized_term=norm,
                 description=desc or None,
-                created_at=datetime.utcnow(),
+                created_at=__import__("datetime").datetime.utcnow(),
             )
             db.add(term_obj)
             terms_upserted += 1
             db.flush()
 
-        # Aliases
-        if aliases:
-            alias_list = [a.strip() for a in aliases.split(",") if a.strip()]
-            for a in alias_list:
-                na = _normalize_term(a)
-                exists_alias = db.query(BclTermAlias).filter(
-                    BclTermAlias.tenant_id == auth.tenant_id,
-                    BclTermAlias.normalized_alias == na,
-                ).first()
-                if exists_alias:
-                    continue
-                alias_obj = BclTermAlias(
-                    tenant_id=auth.tenant_id,
-                    term_id=term_obj.term_id,
-                    alias=a,
-                    normalized_alias=na,
-                    created_at=datetime.utcnow(),
-                )
-                db.add(alias_obj)
-                aliases_created += 1
+    # Optional embedding of terms (term + description)
+    try:
+        from services.embeddings import get_embeddings_client
+        client = get_embeddings_client()
+        # Fetch all updated/new terms for this tenant (simple approach)
+        rows = db.query(BclTerm).filter(BclTerm.tenant_id == auth.tenant_id).all()
+        texts: List[str] = []
+        ids: List[str] = []
+        for t in rows:
+            txt = f"{t.term} - {t.description or ''}".strip()
+            texts.append(txt)
+            ids.append(str(t.term_id))
+        if texts:
+            vecs = client.embed(texts)
+            # Bulk update – best-effort per row
+            for i, v in enumerate(vecs):
+                db.execute(text("UPDATE bcl_terms SET embedding = :emb WHERE term_id::text = :id"), {"emb": v, "id": ids[i]})
+    except Exception:
+        pass
 
     db.commit()
     return ImportGlossaryResponse(terms_upserted=terms_upserted, aliases_created=aliases_created, rows_processed=rows_processed)
 
 
-@router.post("/ground", response_model=GroundResponse)
-async def ground(
-    payload: GroundRequest,
-    db: Session = Depends(get_db),
-    auth: AuthContext = Depends(api_key_or_bearer),
-) -> GroundResponse:
-    from services.embeddings import get_embeddings_client
-    client = get_embeddings_client()
-    [query_vec] = client.embed([payload.query])
+# Removed ground endpoint; glossary-only
 
-    # Terms by vector + FTS hybrid
-    top_k_terms = max(1, int(payload.top_k_terms))
-    term_rows: List[dict] = []
-    # Vector first
-    q1 = text(
-        """
-        SELECT t.term_id::text, t.term, t.normalized_term, t.description,
-               1 - (t.embedding <=> :qvec) AS score
-        FROM bcl_terms t
-        WHERE t.tenant_id::text = :tenant
-          AND t.embedding IS NOT NULL
-        ORDER BY t.embedding <=> :qvec
-        LIMIT :k
-        """
-    ).bindparams(bindparam("qvec", type_=Vector()))
-    for r in db.execute(q1, {"qvec": query_vec, "tenant": str(auth.tenant_id), "k": top_k_terms}):
-        term_rows.append(dict(r._mapping))
-    # FTS fallback if not enough
-    if len(term_rows) < top_k_terms:
-        q2 = text(
+
+# Removed mapping routes
+
+
+# Removed mapping routes
+
+
+# Removed mapping routes
+
+
+# Removed mapping routes
+
+
+# Removed proposals routes
+
+
+@router.get("/terms")
+def search_terms(q: str = "", top_k: int = 10, db: Session = Depends(get_db), auth: AuthContext = Depends(api_key_or_bearer)):
+    q = (q or "").strip()
+    results: List[dict] = []
+    if not q:
+        rows = db.query(BclTerm).filter(BclTerm.tenant_id == auth.tenant_id).order_by(BclTerm.term.asc()).limit(min(int(top_k), 50)).all()
+        return {"terms": [{"term_id": str(t.term_id), "term": t.term, "description": t.description} for t in rows]}
+    # Try vector
+    try:
+        from services.embeddings import get_embeddings_client
+        client = get_embeddings_client()
+        [qvec] = client.embed([q])
+        s = text(
             """
-            SELECT t.term_id::text, t.term, t.normalized_term, t.description,
-                   0.5 AS score
-            FROM bcl_terms t
-            WHERE t.tenant_id::text = :tenant
-              AND to_tsvector('english', coalesce(t.term,'') || ' ' || coalesce(t.description,'')) @@ plainto_tsquery('english', :q)
+            SELECT term_id::text, term, description, 1 - (embedding <=> :qvec) AS score
+            FROM bcl_terms
+            WHERE tenant_id::text = :tenant AND embedding IS NOT NULL
+            ORDER BY embedding <=> :qvec
+            LIMIT :k
+            """
+        ).bindparams(bindparam("qvec", type_=Vector()))
+        for r in db.execute(s, {"qvec": qvec, "tenant": str(auth.tenant_id), "k": int(top_k)}):
+            results.append(dict(r._mapping))
+    except Exception:
+        results = []
+    # FTS fallback
+    if len(results) < int(top_k):
+        s2 = text(
+            """
+            SELECT term_id::text, term, description, 0.5 AS score
+            FROM bcl_terms
+            WHERE tenant_id::text = :tenant
+              AND to_tsvector('english', coalesce(term,'') || ' ' || coalesce(description,'')) @@ plainto_tsquery('english', :q)
             LIMIT :k
             """
         )
-        for r in db.execute(q2, {"tenant": str(auth.tenant_id), "q": payload.query, "k": top_k_terms - len(term_rows)}):
-            term_rows.append(dict(r._mapping))
-
-    # Load aliases and mappings for each term
-    terms: List[TermRead] = []
-    for tr in term_rows:
-        t_id = tr["term_id"]
-        aliases = [a.alias for a in db.query(BclTermAlias).filter(BclTermAlias.term_id == t_id).all()]
-        mappings = [
-            TermMappingRead(
-                mapping_id=str(m.mapping_id),
-                target_kind=m.target_kind,
-                entity_name=m.entity_name,
-                field_name=m.field_name,
-                expression=m.expression,
-                filter=m.filter,
-                rationale=m.rationale,
-                confidence=m.confidence,
-            ) for m in db.query(BclTermMapping).filter(BclTermMapping.term_id == t_id).all()
-        ]
-        terms.append(
-            TermRead(
-                term_id=t_id,
-                term=tr["term"],
-                normalized_term=tr["normalized_term"],
-                description=tr.get("description"),
-                aliases=aliases,
-                mappings=mappings,
-                score=float(tr.get("score") or 0.0),
-            )
-        )
-
-    # Evidence from chunks
-    top_k_evidence = max(1, int(payload.top_k_evidence))
-    evidences: List[EvidenceSnippet] = []
-    q3 = text(
-        """
-        SELECT c.chunk_id::text, c.text, 1 - (c.embedding <=> :qvec) AS score,
-               c.document_id::text AS document_id,
-               d.uri AS document_uri,
-               c.metadata
-        FROM bcl_chunks c
-        JOIN bcl_documents d ON d.document_id = c.document_id
-        WHERE c.tenant_id::text = :tenant
-        ORDER BY c.embedding <=> :qvec
-        LIMIT :k
-        """
-    ).bindparams(bindparam("qvec", type_=Vector()))
-    for r in db.execute(q3, {"qvec": query_vec, "tenant": str(auth.tenant_id), "k": top_k_evidence}):
-        m = dict(r._mapping)
-        evidences.append(
-            EvidenceSnippet(
-                chunk_id=m["chunk_id"],
-                text=m["text"],
-                score=float(m["score"]),
-                document_id=m["document_id"],
-                document_uri=m.get("document_uri"),
-                metadata=m.get("metadata"),
-            )
-        )
-
-    return GroundResponse(terms=terms, evidence=evidences)
+        for r in db.execute(s2, {"tenant": str(auth.tenant_id), "q": q, "k": int(top_k) - len(results)}):
+            results.append(dict(r._mapping))
+    return {"terms": results}
 
 
-@router.get("/terms/{term_id}/mappings", response_model=List[TermMappingRead])
-def list_mappings(term_id: UUID, db: Session = Depends(get_db), auth: AuthContext = Depends(api_key_or_bearer)) -> List[TermMappingRead]:
-    rows = db.query(BclTermMapping).filter(
-        BclTermMapping.term_id == term_id,
-        BclTermMapping.tenant_id == auth.tenant_id,
-    ).all()
-    return [
-        TermMappingRead(
-            mapping_id=str(m.mapping_id),
-            target_kind=m.target_kind,
-            entity_name=m.entity_name,
-            field_name=m.field_name,
-            expression=m.expression,
-            filter=m.filter,
-            rationale=m.rationale,
-            confidence=m.confidence,
-        ) for m in rows
-    ]
-
-
-@router.post("/terms/{term_id}/mappings", response_model=TermMappingRead)
-def create_mapping(term_id: UUID, payload: CreateMappingRequest, db: Session = Depends(get_db), auth: AuthContext = Depends(api_key_or_bearer)) -> TermMappingRead:
-    term = db.query(BclTerm).filter(BclTerm.term_id == term_id, BclTerm.tenant_id == auth.tenant_id).first()
-    if not term:
+@router.get("/terms/{term_id}", response_model=GlossaryTermRead)
+def get_term(term_id: str, db: Session = Depends(get_db), auth: AuthContext = Depends(api_key_or_bearer)) -> GlossaryTermRead:
+    try:
+        term_uuid = _UUID(term_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid term_id")
+    t = db.query(BclTerm).filter(BclTerm.tenant_id == auth.tenant_id, BclTerm.term_id == term_uuid).first()
+    if not t:
         raise HTTPException(status_code=404, detail="Term not found")
-    m = BclTermMapping(
-        tenant_id=auth.tenant_id,
-        term_id=term.term_id,
-        target_kind=payload.target_kind,
-        entity_name=payload.entity_name,
-        field_name=payload.field_name,
-        expression=payload.expression,
-        filter=payload.filter,
-        rationale=payload.rationale,
-        confidence=payload.confidence,
-        created_at=datetime.utcnow(),
-    )
-    db.add(m)
+    return GlossaryTermRead(term_id=str(t.term_id), term=t.term, description=t.description)
+
+
+@router.put("/terms/{term_id}", response_model=GlossaryTermRead)
+def update_term(term_id: str, payload: GlossaryUpdateRequest, db: Session = Depends(get_db), auth: AuthContext = Depends(api_key_or_bearer)) -> GlossaryTermRead:
+    try:
+        term_uuid = _UUID(term_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid term_id")
+    t = db.query(BclTerm).filter(BclTerm.tenant_id == auth.tenant_id, BclTerm.term_id == term_uuid).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Term not found")
+    if payload.term is not None:
+        t.term = payload.term
+        t.normalized_term = _normalize_term(payload.term)
+    if payload.description is not None:
+        t.description = payload.description
     db.commit()
-    db.refresh(m)
-    return TermMappingRead(
-        mapping_id=str(m.mapping_id),
-        target_kind=m.target_kind,
-        entity_name=m.entity_name,
-        field_name=m.field_name,
-        expression=m.expression,
-        filter=m.filter,
-        rationale=m.rationale,
-        confidence=m.confidence,
-    )
+    db.refresh(t)
+    return GlossaryTermRead(term_id=str(t.term_id), term=t.term, description=t.description)
 
 
-@router.put("/mappings/{mapping_id}", response_model=TermMappingRead)
-def update_mapping(mapping_id: UUID, payload: MappingUpdateRequest, db: Session = Depends(get_db), auth: AuthContext = Depends(api_key_or_bearer)) -> TermMappingRead:
-    m = db.query(BclTermMapping).filter(BclTermMapping.mapping_id == mapping_id, BclTermMapping.tenant_id == auth.tenant_id).first()
-    if not m:
-        raise HTTPException(status_code=404, detail="Mapping not found")
-    for field in ["target_kind", "entity_name", "field_name", "expression", "filter", "rationale", "confidence"]:
-        val = getattr(payload, field)
-        if val is not None:
-            setattr(m, field, val)
+@router.delete("/terms/{term_id}", status_code=204)
+def delete_term(term_id: str, db: Session = Depends(get_db), auth: AuthContext = Depends(api_key_or_bearer)):
+    try:
+        term_uuid = _UUID(term_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid term_id")
+    t = db.query(BclTerm).filter(BclTerm.tenant_id == auth.tenant_id, BclTerm.term_id == term_uuid).first()
+    if not t:
+        raise HTTPException(status_code=404, detail="Term not found")
+    db.delete(t)
     db.commit()
-    db.refresh(m)
-    return TermMappingRead(
-        mapping_id=str(m.mapping_id),
-        target_kind=m.target_kind,
-        entity_name=m.entity_name,
-        field_name=m.field_name,
-        expression=m.expression,
-        filter=m.filter,
-        rationale=m.rationale,
-        confidence=m.confidence,
-    )
-
-
-@router.delete("/mappings/{mapping_id}", status_code=204, response_class=Response)
-def delete_mapping(mapping_id: UUID, db: Session = Depends(get_db), auth: AuthContext = Depends(api_key_or_bearer)) -> Response:
-    m = db.query(BclTermMapping).filter(BclTermMapping.mapping_id == mapping_id, BclTermMapping.tenant_id == auth.tenant_id).first()
-    if not m:
-        raise HTTPException(status_code=404, detail="Mapping not found")
-    db.delete(m)
-    db.commit()
-    return Response(status_code=204)
-
-
-@router.post("/propose-mappings", response_model=ProposeMappingsResponse)
-def propose_mappings(db: Session = Depends(get_db), auth: AuthContext = Depends(api_key_or_bearer)) -> ProposeMappingsResponse:
-    result = propose_mappings_for_all_terms(db, auth.tenant_id)
-    return ProposeMappingsResponse(**result)
-
-
-@router.get("/proposals", response_model=ListProposalsResponse)
-def list_proposals(db: Session = Depends(get_db), auth: AuthContext = Depends(api_key_or_bearer)) -> ListProposalsResponse:
-    rows = db.query(BclMappingProposal, BclTerm).join(BclTerm, BclTerm.term_id == BclMappingProposal.term_id).filter(
-        BclMappingProposal.tenant_id == auth.tenant_id
-    ).order_by(BclMappingProposal.created_at.desc()).all()
-    items: List[ProposalRead] = []
-    for mp, term in rows:
-        items.append(ProposalRead(
-            proposal_id=str(mp.proposal_id),
-            term_id=str(term.term_id),
-            term=term.term,
-            target_kind=mp.target_kind,
-            entity_name=mp.entity_name,
-            field_name=mp.field_name,
-            expression=mp.expression,
-            filter=mp.filter,
-            rationale=mp.rationale,
-            confidence=mp.confidence,
-            evidence=mp.evidence,
-            created_at=mp.created_at.isoformat() + "Z",
-        ))
-    return ListProposalsResponse(proposals=items)
-
-
-@router.post("/proposals/{proposal_id}/accept", response_model=AcceptRejectResponse)
-def accept_proposal(proposal_id: UUID, db: Session = Depends(get_db), auth: AuthContext = Depends(api_key_or_bearer)) -> AcceptRejectResponse:
-    mp = db.query(BclMappingProposal).filter(
-        BclMappingProposal.proposal_id == proposal_id,
-        BclMappingProposal.tenant_id == auth.tenant_id,
-    ).first()
-    if not mp:
-        raise HTTPException(status_code=404, detail="Proposal not found")
-    # Create mapping
-    m = BclTermMapping(
-        tenant_id=auth.tenant_id,
-        term_id=mp.term_id,
-        target_kind=mp.target_kind,
-        entity_name=mp.entity_name,
-        field_name=mp.field_name,
-        expression=mp.expression,
-        filter=mp.filter,
-        rationale=mp.rationale,
-        confidence=mp.confidence,
-        created_at=datetime.utcnow(),
-    )
-    db.add(m)
-    # Delete proposal after accept
-    db.delete(mp)
-    db.commit()
-    db.refresh(m)
-    return AcceptRejectResponse(status="accepted", mapping=TermMappingRead(
-        mapping_id=str(m.mapping_id),
-        target_kind=m.target_kind,
-        entity_name=m.entity_name,
-        field_name=m.field_name,
-        expression=m.expression,
-        filter=m.filter,
-        rationale=m.rationale,
-        confidence=m.confidence,
-    ))
-
-
-@router.post("/proposals/{proposal_id}/reject", response_model=AcceptRejectResponse)
-def reject_proposal(proposal_id: UUID, db: Session = Depends(get_db), auth: AuthContext = Depends(api_key_or_bearer)) -> AcceptRejectResponse:
-    mp = db.query(BclMappingProposal).filter(
-        BclMappingProposal.proposal_id == proposal_id,
-        BclMappingProposal.tenant_id == auth.tenant_id,
-    ).first()
-    if not mp:
-        raise HTTPException(status_code=404, detail="Proposal not found")
-    db.delete(mp)
-    db.commit()
-    return AcceptRejectResponse(status="rejected", mapping=None)
+    return None
 
 

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import os, json, logging, re
 from uuid import UUID
 from sqlalchemy.orm import Session
+from sqlalchemy import text, bindparam
 
 from models.connector import Connector
 from models.schema_review import GlobalCanonicalSchema
@@ -19,6 +20,8 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from .tools import make_generic_tools
+from pgvector.sqlalchemy import Vector
+from services.embeddings import get_embeddings_client
 
 logger = logging.getLogger("chat_graph")
 
@@ -383,6 +386,102 @@ def _load_canonical_summary(db: Session, tenant_id: UUID) -> Dict[str, Any]:
         pass
     return {"unified_entities": []}
 
+
+def _normalize_term_value(value: str) -> str:
+    try:
+        return " ".join((value or "").strip().lower().split())
+    except Exception:
+        return value or ""
+
+
+def _glossary_context_for_query(db: Session, tenant_id: UUID, query_text: str, top_k_terms: int = 5) -> Dict[str, Any]:
+    """Glossary-only matching for chat context.
+    Order: exact normalized match → vector (if available) → FTS fallback.
+    Returns { terms: [{term, normalized_term, description, score}] }.
+    """
+    term_rows: List[Dict[str, Any]] = []
+
+    # 1) Exact normalized equality
+    try:
+        norm_q = _normalize_term_value(query_text)
+        if norm_q:
+            q_eq = text(
+                """
+                SELECT t.term_id::text, t.term, t.normalized_term, t.description,
+                       1.0 AS score
+                FROM bcl_terms t
+                WHERE t.tenant_id::text = :tenant
+                  AND t.normalized_term = :norm_q
+                LIMIT :k
+                """
+            )
+            for r in db.execute(q_eq, {"tenant": str(tenant_id), "norm_q": norm_q, "k": int(top_k_terms)}):
+                term_rows.append(dict(r._mapping))
+        if term_rows:
+            logger.info("BCL: exact-normalized matched %d terms", len(term_rows))
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    # 2) Vector semantic match
+    if len(term_rows) < int(top_k_terms):
+        try:
+            client = get_embeddings_client()
+            [qvec] = client.embed([query_text])
+            q_vec = text(
+                """
+                SELECT t.term_id::text, t.term, t.normalized_term, t.description,
+                       1 - (t.embedding <=> :qvec) AS score
+                FROM bcl_terms t
+                WHERE t.tenant_id::text = :tenant AND t.embedding IS NOT NULL
+                ORDER BY t.embedding <=> :qvec
+                LIMIT :k
+                """
+            ).bindparams(bindparam("qvec", type_=Vector()))
+            for r in db.execute(q_vec, {"qvec": qvec, "tenant": str(tenant_id), "k": int(top_k_terms - len(term_rows))}):
+                term_rows.append(dict(r._mapping))
+            logger.info("BCL: vector matched total %d terms", len(term_rows))
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    # 3) FTS fallback
+    if len(term_rows) < int(top_k_terms) and isinstance(query_text, str) and query_text.strip():
+        q_fts = text(
+            """
+            SELECT t.term_id::text, t.term, t.normalized_term, t.description,
+                   0.5 AS score
+            FROM bcl_terms t
+            WHERE t.tenant_id::text = :tenant
+              AND to_tsvector('english', coalesce(t.term,'') || ' ' || coalesce(t.description,'')) @@ plainto_tsquery('english', :q)
+            LIMIT :k
+            """
+        )
+        try:
+            for r in db.execute(q_fts, {"tenant": str(tenant_id), "q": query_text, "k": int(top_k_terms - len(term_rows))}):
+                term_rows.append(dict(r._mapping))
+            logger.info("BCL: FTS matched total %d terms", len(term_rows))
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    # Build response
+    terms: List[Dict[str, Any]] = []
+    for tr in term_rows:
+        terms.append({
+            "term": tr.get("term"),
+            "normalized_term": tr.get("normalized_term"),
+            "description": tr.get("description"),
+            "score": float(tr.get("score") or 0.0),
+        })
+    return {"terms": terms}
+
 def run_chat_agent(db: Session, tenant_id: UUID, message: str) -> Dict[str, Any]:
     raise RuntimeError(
         "run_chat_agent() has been removed. Use run_chat_agent_stream() and aggregate its events for a final response."
@@ -449,17 +548,29 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
 
     tools = make_generic_tools(connectors, connector_schemas, on_rows=_on_rows)
 
+    glossary_ctx = _glossary_context_for_query(db, tenant_id, message)
+
     payload = {
         "tenant_id": str(tenant_id),
         "connectors": conn_summaries,
         "canonical_summary": canonical_summary,
         "connector_schemas": connector_schemas,
         "connector_capabilities": connector_capabilities,
+        "glossary_context": glossary_ctx,
     }
+
+    try:
+        logger.info("BCL: Chat Payload %s", json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        logger.info("BCL: Chat Payload %s", str(payload))
+
     context_json = json.dumps(payload)
     prompt = ChatPromptTemplate.from_messages([
         ("system", agent_instructions),
         ("system", "Context for tools and planning (JSON): {context}"),
+        ("system", "If glossary_context.terms contains any term mentioned or implied by the user, you MUST use the provided mappings exactly (expressions/filters) and MUST NOT substitute alternative definitions. "
+                   "Prefer mappings with higher confidence. When you explain your answer, concisely reflect the provided rationale where helpful. "
+                   "If no mappings are given for a relevant term, ask a brief clarification rather than assuming a definition."),
         MessagesPlaceholder("chat_history"),
         ("human", "{input}"),
         MessagesPlaceholder("agent_scratchpad"),

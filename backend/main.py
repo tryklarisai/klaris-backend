@@ -17,6 +17,7 @@ try:
 except Exception:
     level = logging.INFO
 logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.getLogger("chat_graph").setLevel(level)
 
 app = FastAPI()
 
