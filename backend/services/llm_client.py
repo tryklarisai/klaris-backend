@@ -99,6 +99,7 @@ class AnthropicClient(LLMClient):
         last_err: Optional[Exception] = None
         while attempt <= self.retry_max:
             try:
+                t0 = time.time()
                 resp = self.client.messages.create(
                     model=self.model,
                     max_tokens=max_tokens or self.max_tokens,
@@ -115,6 +116,27 @@ class AnthropicClient(LLMClient):
                 }
                 if usage["input_tokens"] is not None and usage["output_tokens"] is not None:
                     usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+                # Best-effort usage logging
+                try:
+                    from services.usage import log_usage_event  # local import to avoid cycles
+                    db = getattr(self, "_db", None)
+                    tenant_id = getattr(self, "_tenant_id", None)
+                    if db is not None and tenant_id:
+                        log_usage_event(
+                            db,
+                            tenant_id=str(tenant_id),
+                            provider="anthropic",
+                            model=self.model,
+                            operation="chat",
+                            category=getattr(self, "_category", None),
+                            input_tokens=usage.get("input_tokens"),
+                            output_tokens=usage.get("output_tokens"),
+                            total_tokens=usage.get("total_tokens"),
+                            request_id=getattr(resp, "id", None),
+                            latency_ms=int((time.time() - t0) * 1000),
+                        )
+                except Exception:
+                    pass
                 return parsed, usage
             except Exception as e:
                 last_err = e
@@ -210,6 +232,7 @@ class OpenAIClient(LLMClient):
         }
         while attempt <= self.retry_max:
             try:
+                t0 = time.time()
                 resp = requests.post(url, headers=headers, json=payload, timeout=timeout or self.timeout)
                 resp.raise_for_status()
                 data = resp.json()
@@ -234,6 +257,27 @@ class OpenAIClient(LLMClient):
                     text2 = data2.get("choices", [{}])[0].get("message", {}).get("content") or "{}"
                     parsed = self._best_effort_parse(text2)
                 usage = data.get("usage", {})
+                # Best-effort usage logging
+                try:
+                    from services.usage import log_usage_event  # local import to avoid cycles
+                    db = getattr(self, "_db", None)
+                    tenant_id = getattr(self, "_tenant_id", None)
+                    if db is not None and tenant_id:
+                        log_usage_event(
+                            db,
+                            tenant_id=str(tenant_id),
+                            provider="openai",
+                            model=self.model,
+                            operation="chat",
+                            category=getattr(self, "_category", None),
+                            input_tokens=usage.get("prompt_tokens"),
+                            output_tokens=usage.get("completion_tokens"),
+                            total_tokens=usage.get("total_tokens"),
+                            request_id=resp.headers.get("x-request-id") or data.get("id"),
+                            latency_ms=int((time.time() - t0) * 1000),
+                        )
+                except Exception:
+                    pass
                 return parsed, usage
             except Exception as e:
                 last_err = e
@@ -299,6 +343,8 @@ def get_llm_client_for_settings(settings: dict) -> Tuple[str, str, LLMClient]:
             retry_max=int(get_setting(settings, KEY_LLM_RETRY_MAX, 2)),
             backoff_base=float(get_setting(settings, KEY_LLM_BACKOFF_BASE, 0.5)),
         )
+        # allow usage logger context injection by callers
+        setattr(client, "_provider", "openai")
         return provider, model, client
     elif provider == "anthropic":
         client = AnthropicClient(
@@ -309,6 +355,7 @@ def get_llm_client_for_settings(settings: dict) -> Tuple[str, str, LLMClient]:
             retry_max=int(get_setting(settings, KEY_LLM_RETRY_MAX, 2)),
             backoff_base=float(get_setting(settings, KEY_LLM_BACKOFF_BASE, 0.5)),
         )
+        setattr(client, "_provider", "anthropic")
         return provider, model, client
     else:
         raise RuntimeError(f"Unsupported LLM provider: {provider}")

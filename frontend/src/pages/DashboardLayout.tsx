@@ -43,6 +43,7 @@ const mainMenu = [
   { key: "connectors", label: "Connectors", path: "/connectors", icon: <ExtensionIcon fontSize="small" /> },
   { key: "relationships", label: "Data Relationships", path: "/relationships", icon: <SchemaIcon fontSize="small" /> },
   { key: "bcl", label: "Business Context", path: "/bcl", icon: <LibraryBooksIcon fontSize="small" /> },
+  { key: "usage", label: "Usage", path: "/usage", icon: <SchemaIcon fontSize="small" /> },
   { key: "chat", label: "Chat", path: "/chat", icon: <ChatIcon fontSize="small" /> }
 ];
 
@@ -57,6 +58,7 @@ export default function DashboardLayout() {
     if (p.startsWith('/connectors')) return 'connectors';
     if (p.startsWith('/relationships')) return 'relationships';
     if (p.startsWith('/chat')) return 'chat';
+    if (p.startsWith('/usage')) return 'usage';
     if (p.startsWith('/bcl')) return 'bcl';
     if (p.startsWith('/profile')) return 'profile';
     return 'dashboard';

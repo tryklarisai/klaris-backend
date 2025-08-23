@@ -9,6 +9,7 @@ from routers.relationships import router as relationships_router
 from routers.schemas import router as schema_router
 from routers.chat import router as chat_router
 from routers.bcl import router as bcl_router
+from routers.usage import router as usage_router
 
 # Configure root logging (stdout handler) with level from env
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -37,6 +38,7 @@ app.include_router(schema_router)
 app.include_router(relationships_router)
 app.include_router(chat_router)
 app.include_router(bcl_router)
+app.include_router(usage_router)
 
 @app.get("/api/health")
 def health():

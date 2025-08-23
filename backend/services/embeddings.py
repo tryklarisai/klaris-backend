@@ -8,6 +8,7 @@ from constants import (
     OPENAI_BASE_URL as KEY_OPENAI_BASE_URL,
 )
 from sqlalchemy.orm import Session
+from services.usage import log_usage_event
 
 
 class EmbeddingsClient:
@@ -25,17 +26,28 @@ class OpenAIEmbeddingsClient(EmbeddingsClient):
         self.timeout = int(timeout)
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        import requests
+        import requests, time
         url = f"{self.base_url}/embeddings"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         payload = {"model": self.model, "input": texts}
+        t0 = time.time()
         resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
         vectors = [item["embedding"] for item in data.get("data", [])]
+        # Usage tracking (tokens may be absent; capture latency and request id if present)
+        try:
+            input_tokens = data.get("usage", {}).get("prompt_tokens") or None
+            output_tokens = data.get("usage", {}).get("completion_tokens") or None
+            total_tokens = data.get("usage", {}).get("total_tokens") or None
+            request_id = resp.headers.get("x-request-id") or data.get("id")
+            latency_ms = int((time.time() - t0) * 1000)
+            # We don't have db/tenant here. Caller will use tenant-scoped wrapper below.
+        except Exception:
+            pass
         if len(vectors) != len(texts):
             raise RuntimeError("Embedding count mismatch")
         return vectors
@@ -56,4 +68,35 @@ def get_embeddings_client_for_settings(settings: dict) -> EmbeddingsClient:
 def get_embeddings_client_for_tenant(db: Session, tenant_id: str) -> EmbeddingsClient:
     settings = get_tenant_settings(db, tenant_id)
     return get_embeddings_client_for_settings(settings)
+
+
+def embed_and_log(db: Session, tenant_id: str, texts: List[str], category: str | None = None) -> List[List[float]]:
+    client = get_embeddings_client_for_tenant(db, tenant_id)
+    settings = get_tenant_settings(db, tenant_id)
+    provider = str(get_setting(settings, KEY_EMBEDDING_PROVIDER, "openai")).lower()
+    model = str(get_setting(settings, KEY_EMBEDDING_MODEL, "text-embedding-3-small"))
+    import time, requests
+    t0 = time.time()
+    try:
+        vectors = client.embed(texts)
+    finally:
+        # Best-effort logging with minimal fields
+        try:
+            # No token breakdown normally available from embeddings API; log total count if known by len(texts)
+            log_usage_event(
+                db,
+                tenant_id=tenant_id,
+                provider=provider,
+                model=model,
+                operation="embedding",
+                category=category,
+                input_tokens=None,
+                output_tokens=None,
+                total_tokens=None,
+                request_id=None,
+                latency_ms=int((time.time() - t0) * 1000),
+            )
+        except Exception:
+            pass
+    return vectors
 
