@@ -66,9 +66,9 @@ export default function UsagePage() {
     load();
   }, [headers, tenant, range]);
 
-  const catData = useMemo(() => (summary?.by_category || []).map((r: any) => ({ name: r.category || 'uncategorized', tokens: Number(r.total_tokens || 0) })), [summary]);
-  const modelData = useMemo(() => (summary?.by_model || []).map((r: any) => ({ name: r.model || 'unknown', tokens: Number(r.total_tokens || 0) })), [summary]);
-  const byModule = useMemo(() => (summary?.by_module || []).map((r: any) => ({ name: r.module || 'unknown', tokens: Number(r.total_tokens || 0) })), [summary]);
+  const catData = useMemo(() => (summary?.by_category || []).map((r: any) => ({ name: r.category || 'uncategorized', input: Number(r.input_tokens || 0), output: Number(r.output_tokens || 0) })), [summary]);
+  const modelData = useMemo(() => (summary?.by_model || []).map((r: any) => ({ name: r.model || 'unknown', input: Number(r.input_tokens || 0), output: Number(r.output_tokens || 0) })), [summary]);
+  const byModule = useMemo(() => (summary?.by_module || []).map((r: any) => ({ name: r.module || 'unknown', input: Number(r.input_tokens || 0), output: Number(r.output_tokens || 0) })), [summary]);
 
   return (
     <div style={{ padding: 24 }}>
@@ -104,9 +104,9 @@ export default function UsagePage() {
                 <YAxis tick={{ fontSize: 10 }} />
                 <Tooltip />
                 <Legend />
-                <Line type="monotone" dataKey="total" stroke="#1976d2" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="input" stroke="#2e7d32" strokeWidth={1.5} dot={false} />
-                <Line type="monotone" dataKey="output" stroke="#ef6c00" strokeWidth={1.5} dot={false} />
+                <Line type="monotone" dataKey="total" stroke="#5e35b1" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="input" stroke="#42a5f5" strokeWidth={1.5} dot={false} />
+                <Line type="monotone" dataKey="output" stroke="#ffb74d" strokeWidth={1.5} dot={false} />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -124,7 +124,9 @@ export default function UsagePage() {
                   <XAxis type="number" tick={{ fontSize: 10 }} />
                   <YAxis type="category" dataKey="name" width={140} tick={{ fontSize: 11 }} />
                   <Tooltip />
-                  <Bar dataKey="tokens" fill="#1976d2" radius={4} />
+                  <Legend />
+                  <Bar dataKey="input" stackId="a" fill="#42a5f5" radius={4} />
+                  <Bar dataKey="output" stackId="a" fill="#ffb74d" radius={4} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -136,7 +138,9 @@ export default function UsagePage() {
                   <XAxis type="number" tick={{ fontSize: 10 }} />
                   <YAxis type="category" dataKey="name" width={140} tick={{ fontSize: 11 }} />
                   <Tooltip />
-                  <Bar dataKey="tokens" fill="#00897b" radius={4} />
+                  <Legend />
+                  <Bar dataKey="input" stackId="a" fill="#42a5f5" radius={4} />
+                  <Bar dataKey="output" stackId="a" fill="#ffb74d" radius={4} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -148,7 +152,9 @@ export default function UsagePage() {
                   <XAxis type="number" tick={{ fontSize: 10 }} />
                   <YAxis type="category" dataKey="name" width={140} tick={{ fontSize: 11 }} />
                   <Tooltip />
-                  <Bar dataKey="tokens" fill="#7b68ee" radius={4} />
+                  <Legend />
+                  <Bar dataKey="input" stackId="a" fill="#42a5f5" radius={4} />
+                  <Bar dataKey="output" stackId="a" fill="#ffb74d" radius={4} />
                 </BarChart>
               </ResponsiveContainer>
             </div>

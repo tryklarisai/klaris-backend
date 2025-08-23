@@ -140,9 +140,33 @@ def usage_summary(
         params["to_ts"] = to_ts
     where_sql = " AND ".join(where)
     total = db.execute(text(f"SELECT coalesce(sum(input_tokens),0) AS input_tokens, coalesce(sum(output_tokens),0) AS output_tokens, coalesce(sum(total_tokens),0) AS total_tokens FROM usage_events WHERE {where_sql}"), params).first()
-    by_category = [dict(r._mapping) for r in db.execute(text(f"SELECT category, coalesce(sum(total_tokens),0) AS total_tokens FROM usage_events WHERE {where_sql} GROUP BY 1 ORDER BY 2 DESC"), params)]
-    by_model = [dict(r._mapping) for r in db.execute(text(f"SELECT model, coalesce(sum(total_tokens),0) AS total_tokens FROM usage_events WHERE {where_sql} GROUP BY 1 ORDER BY 2 DESC"), params)]
-    by_module = [dict(r._mapping) for r in db.execute(text(f"SELECT module, coalesce(sum(total_tokens),0) AS total_tokens FROM usage_events WHERE {where_sql} GROUP BY 1 ORDER BY 2 DESC"), params)]
+    by_category = [
+        dict(r._mapping)
+        for r in db.execute(
+            text(
+                f"SELECT category, coalesce(sum(input_tokens),0) AS input_tokens, coalesce(sum(output_tokens),0) AS output_tokens, coalesce(sum(total_tokens),0) AS total_tokens FROM usage_events WHERE {where_sql} GROUP BY 1 ORDER BY 4 DESC"
+            ),
+            params,
+        )
+    ]
+    by_model = [
+        dict(r._mapping)
+        for r in db.execute(
+            text(
+                f"SELECT model, coalesce(sum(input_tokens),0) AS input_tokens, coalesce(sum(output_tokens),0) AS output_tokens, coalesce(sum(total_tokens),0) AS total_tokens FROM usage_events WHERE {where_sql} GROUP BY 1 ORDER BY 4 DESC"
+            ),
+            params,
+        )
+    ]
+    by_module = [
+        dict(r._mapping)
+        for r in db.execute(
+            text(
+                f"SELECT module, coalesce(sum(input_tokens),0) AS input_tokens, coalesce(sum(output_tokens),0) AS output_tokens, coalesce(sum(total_tokens),0) AS total_tokens FROM usage_events WHERE {where_sql} GROUP BY 1 ORDER BY 4 DESC"
+            ),
+            params,
+        )
+    ]
     return {
         "total": dict(total._mapping) if total else {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
         "by_category": by_category,
