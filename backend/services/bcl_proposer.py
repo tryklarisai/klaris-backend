@@ -6,7 +6,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-from services.llm_client import get_llm_client
+from services.llm_client import get_llm_client_for_tenant
 from models.bcl import BclTerm, BclMappingProposal
 
 
@@ -57,7 +57,7 @@ def propose_mappings_for_all_terms(db: Session, tenant_id: str) -> Dict[str, Any
     context_snippets = _collect_context_snippets(db, tenant_id)
 
     # Build prompt (connector-agnostic) and call LLM
-    provider, model, client = get_llm_client()
+    provider, model, client = get_llm_client_for_tenant(db, tenant_id)
     import json
     system = (
         "You propose business-term mappings to a canonical data model."

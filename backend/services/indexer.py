@@ -1,6 +1,5 @@
 from __future__ import annotations
 from typing import Any, Dict, List, Tuple
-import os
 import json
 import hashlib
 from datetime import datetime
@@ -10,7 +9,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.orm import Session
 
-from services.llm_client import get_llm_client
+from services.settings import get_tenant_settings, get_setting
+from constants import INDEX_MAX_TEXT_LEN as KEY_INDEX_MAX_TEXT_LEN
+from constants import INDEX_MAX_FIELDS_PER_ENTITY as KEY_INDEX_MAX_FIELDS_PER_ENTITY
 
 
 def _hash_key(parts: List[str]) -> str:
@@ -21,11 +22,7 @@ def _hash_key(parts: List[str]) -> str:
     return h.hexdigest()
 
 
-def _truncate(text_value: str, max_len_env: str = "INDEX_MAX_TEXT_LEN") -> str:
-    try:
-        max_len = int(os.getenv(max_len_env, "1200"))
-    except Exception:
-        max_len = 1200
+def _truncate(text_value: str, max_len: int) -> str:
     if text_value is None:
         return ""
     if len(text_value) <= max_len:
@@ -41,7 +38,7 @@ def _compute_entity_card(entity: dict, version: str, generated_at: str) -> Tuple
     join_fields = [f.get("name") for f in fields if f.get("is_join_key")]
     pii_any = any((f.get("pii") or "none").lower() != "none" for f in fields)
     notable = []
-    for f in fields[: min(len(fields), int(os.getenv("INDEX_MAX_FIELDS_PER_ENTITY", "200")) )]:
+    for f in fields:
         if f.get("primary_key") or f.get("is_join_key") or (f.get("pii") or "none").lower() != "none":
             notable.append(f.get("name"))
     desc = entity.get("description") or ""
@@ -61,7 +58,7 @@ def _compute_entity_card(entity: dict, version: str, generated_at: str) -> Tuple
         "join_keys": join_fields,
         "field_count": len(fields),
     }
-    return _truncate(card_text), metadata
+    return card_text, metadata
 
 
 def _compute_field_card(entity_name: str, field: dict) -> Tuple[str, Dict[str, Any]]:
@@ -91,7 +88,7 @@ def _compute_field_card(entity_name: str, field: dict) -> Tuple[str, Dict[str, A
         "confidence": conf,
         "mappings": mappings,
     }
-    return _truncate(card_text, "INDEX_MAX_TEXT_LEN"), metadata
+    return card_text, metadata
 
 
 def _compute_relationship_card(version: str, generated_at: str, rel: dict) -> Tuple[str, Dict[str, Any]]:
@@ -112,16 +109,19 @@ def _compute_relationship_card(version: str, generated_at: str, rel: dict) -> Tu
         "version": version,
         "generated_at": generated_at,
     }
-    return _truncate(card_text), metadata
+    return card_text, metadata
 
 
-def _embed_texts(texts: List[str]) -> List[List[float]]:
-    from services.embeddings import get_embeddings_client
-    client = get_embeddings_client()
+def _embed_texts(db: Session, tenant_id: str, texts: List[str]) -> List[List[float]]:
+    from services.embeddings import get_embeddings_client_for_tenant
+    client = get_embeddings_client_for_tenant(db, tenant_id)
     return client.embed(texts)
 
 
 def upsert_cards(db: Session, tenant_id: str, canonical: Dict[str, Any]) -> Dict[str, Any]:
+    settings = get_tenant_settings(db, tenant_id)
+    max_text_len = int(get_setting(settings, KEY_INDEX_MAX_TEXT_LEN, 1200))
+    max_fields_per_entity = int(get_setting(settings, KEY_INDEX_MAX_FIELDS_PER_ENTITY, 200))
     version = canonical.get("version") or ""
     generated_at = canonical.get("generated_at") or datetime.utcnow().isoformat() + "Z"
     entities = canonical.get("entities") or []
@@ -136,22 +136,22 @@ def upsert_cards(db: Session, tenant_id: str, canonical: Dict[str, Any]) -> Dict
         text_value, meta = _compute_entity_card(ent, version, generated_at)
         meta["tenant_id"] = tenant_id
         key_hash = _hash_key([tenant_id, "entity", ent.get("name") or ""])
-        entity_cards.append((text_value, meta, key_hash))
-        for f in ent.get("fields") or []:
+        entity_cards.append((_truncate(text_value, max_text_len), meta, key_hash))
+        for f in (ent.get("fields") or [])[:max_fields_per_entity]:
             f_text, f_meta = _compute_field_card(ent.get("name") or "", f)
             f_meta["tenant_id"] = tenant_id
             f_key_hash = _hash_key([tenant_id, "field", ent.get("name") or "", f.get("name") or ""])
-            field_cards.append((f_text, f_meta, f_key_hash))
+            field_cards.append((_truncate(f_text, max_text_len), f_meta, f_key_hash))
 
     for rel in relationships:
         r_text, r_meta = _compute_relationship_card(version, generated_at, rel)
         r_meta["tenant_id"] = tenant_id
         r_key_hash = _hash_key([tenant_id, "relationship", rel.get("from_entity") or "", rel.get("to_entity") or "", rel.get("type") or ""])
-        rel_cards.append((r_text, r_meta, r_key_hash))
+        rel_cards.append((_truncate(r_text, max_text_len), r_meta, r_key_hash))
 
     # Embed texts
     texts = [t for (t, _, _) in entity_cards + field_cards + rel_cards]
-    embeddings = _embed_texts(texts)
+    embeddings = _embed_texts(db, tenant_id, texts)
 
     # Upsert into pgvector-backed table (embedding stored as pgvector 'vector' type)
     now_dt = datetime.utcnow()

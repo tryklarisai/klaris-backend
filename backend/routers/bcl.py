@@ -144,8 +144,8 @@ async def import_glossary(
 
     # Optional embedding of terms (term + description)
     try:
-        from services.embeddings import get_embeddings_client
-        client = get_embeddings_client()
+        from services.embeddings import get_embeddings_client_for_tenant
+        client = get_embeddings_client_for_tenant(db, auth.tenant_id)
         # Fetch all updated/new terms for this tenant (simple approach)
         rows = db.query(BclTerm).filter(BclTerm.tenant_id == auth.tenant_id).all()
         texts: List[str] = []
@@ -193,8 +193,8 @@ def search_terms(q: str = "", top_k: int = 10, db: Session = Depends(get_db), au
         return {"terms": [{"term_id": str(t.term_id), "term": t.term, "description": t.description} for t in rows]}
     # Try vector
     try:
-        from services.embeddings import get_embeddings_client
-        client = get_embeddings_client()
+        from services.embeddings import get_embeddings_client_for_tenant
+        client = get_embeddings_client_for_tenant(db, auth.tenant_id)
         [qvec] = client.embed([q])
         s = text(
             """

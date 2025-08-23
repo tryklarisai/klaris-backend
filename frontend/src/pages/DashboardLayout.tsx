@@ -25,6 +25,7 @@ import ExtensionIcon from '@mui/icons-material/Extension';
 import SchemaIcon from '@mui/icons-material/Hub';
 import LibraryBooksIcon from '@mui/icons-material/LibraryBooks';
 import LogoutIcon from '@mui/icons-material/Logout';
+import SettingsIcon from '@mui/icons-material/Settings';
 import Brightness4Icon from '@mui/icons-material/Brightness4';
 import Brightness7Icon from '@mui/icons-material/Brightness7';
 import ChatIcon from '@mui/icons-material/Chat';
@@ -57,6 +58,7 @@ export default function DashboardLayout() {
     if (p.startsWith('/relationships')) return 'relationships';
     if (p.startsWith('/chat')) return 'chat';
     if (p.startsWith('/bcl')) return 'bcl';
+    if (p.startsWith('/profile')) return 'profile';
     return 'dashboard';
   }, [location.pathname]);
   const isMobile = useMediaQuery('(max-width:900px)');
@@ -228,6 +230,14 @@ export default function DashboardLayout() {
             </React.Fragment>
           )
         ))}
+        <ListItemButton
+          key={'profile'}
+          selected={activeKey === 'profile'}
+          onClick={() => { navigate('/profile'); setMobileOpen(false); }}
+        >
+          <SettingsIcon fontSize="small" />
+          <ListItemText primary={'Profile'} sx={{ ml: 1.5 }} />
+        </ListItemButton>
       </List>
       <Divider />
       <Box sx={{ p: 2 }}>

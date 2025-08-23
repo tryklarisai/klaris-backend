@@ -14,6 +14,7 @@ from constants import TENANT_LIST_LIMIT, TENANT_SETTINGS_DEFAULT
 import re
 from sqlalchemy.exc import SQLAlchemyError
 from passlib.context import CryptContext
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/v1/tenants", tags=["Tenants"])
 
@@ -80,3 +81,30 @@ def list_tenants(db: Session = Depends(get_db)) -> List[TenantRead]:
     """List all tenants (for onboarding/admin)."""
     tenants = db.query(Tenant).order_by(Tenant.name).limit(TENANT_LIST_LIMIT).all()
     return [TenantRead.model_validate(t) for t in tenants]
+
+
+class TenantSettingsRead(BaseModel):
+    settings: dict
+
+
+class TenantSettingsUpdate(BaseModel):
+    settings: dict
+
+
+@router.get("/{tenant_id}/settings", response_model=TenantSettingsRead)
+def get_tenant_settings(tenant_id: UUID, db: Session = Depends(get_db)) -> TenantSettingsRead:
+    tenant = db.query(Tenant).filter(Tenant.tenant_id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return TenantSettingsRead(settings=tenant.settings or TENANT_SETTINGS_DEFAULT)
+
+
+@router.put("/{tenant_id}/settings", response_model=TenantSettingsRead)
+def update_tenant_settings(tenant_id: UUID, payload: TenantSettingsUpdate, db: Session = Depends(get_db)) -> TenantSettingsRead:
+    tenant = db.query(Tenant).filter(Tenant.tenant_id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    tenant.settings = payload.settings or {}
+    db.commit()
+    db.refresh(tenant)
+    return TenantSettingsRead(settings=tenant.settings)

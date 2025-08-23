@@ -11,6 +11,7 @@ import ConnectorDetailPage from "./pages/ConnectorDetailPage";
 import DataRelationshipsPage from "./pages/DataRelationshipsPage";
 import ChatPage from "./pages/ChatPage";
 import BclPage from "./pages/BclPage";
+import ProfilePage from "./pages/ProfilePage";
 
 function App() {
   return (
@@ -27,6 +28,7 @@ function App() {
               <Route path="connectors/:connectorId" element={<ConnectorDetailPage />} />
               <Route path="relationships" element={<DataRelationshipsPage />} />
               <Route path="bcl" element={<BclPage />} />
+              <Route path="profile" element={<ProfilePage />} />
               <Route path="chat" element={<ChatPage />} />
               <Route path="chat/:threadId" element={<ChatPage />} />
             </Route>

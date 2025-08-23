@@ -16,7 +16,7 @@ from db import get_db
 from models.connector import Connector
 from models.schema import Schema
 from models.schema_review import DatasetReview, GlobalCanonicalSchema, ReviewStatusEnum
-from services.llm_client import get_llm_client
+from services.llm_client import get_llm_client_for_tenant
 from pydantic import BaseModel, UUID4, Field
 from sqlalchemy import text as sql_text, select, Table, Column, String as SAString, Text as SAText, DateTime as SADateTime, MetaData
 from sqlalchemy.dialects.postgresql import UUID as PGUUID, JSONB
@@ -170,7 +170,7 @@ def create_dataset_review(
         raise HTTPException(status_code=400, detail="No schemas available for selected connectors")
     logger.info("[relationships] latest_schemas=%d", len(latest_schemas))
 
-    provider, model, client = get_llm_client()
+    provider, model, client = get_llm_client_for_tenant(db, str(tenant_id))
     options = body.options or CreateDatasetReviewOptions()
     rel_conf_threshold = float(options.confidence_threshold or 0.6)
 

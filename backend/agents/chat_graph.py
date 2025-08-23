@@ -21,12 +21,15 @@ from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from .tools import make_generic_tools
 from pgvector.sqlalchemy import Vector
-from services.embeddings import get_embeddings_client
+from services.embeddings import get_embeddings_client_for_tenant
+from services.settings import get_tenant_settings, get_setting
 
 logger = logging.getLogger("chat_graph")
 
 # In-memory store for chat histories keyed by session (tenant + thread)
 _THREAD_HISTORIES: dict[str, InMemoryChatMessageHistory] = {}
+# Per-session max turns configured from tenant settings
+_SESSION_MAX_TURNS: dict[str, int] = {}
 
 class MessageHistory:
     """Lightweight message history used in tests/back-compat.
@@ -71,23 +74,28 @@ def delete_thread(tenant_id: UUID, thread_id: str) -> bool:
     key = _session_key(tenant_id, thread_id)
     return _THREAD_HISTORIES.pop(key, None) is not None
 
-def _make_llm():
-    provider = os.getenv("LLM_PROVIDER", "openai").lower()
-    model = os.getenv("LLM_MODEL", "gpt-4o")
-    temperature = float(os.getenv("LLM_TEMPERATURE", "0"))
+def _make_llm_for_tenant(db: Session, tenant_id: UUID):
+    settings = get_tenant_settings(db, tenant_id)
+    provider = str(get_setting(settings, "LLM_PROVIDER", "openai")).lower()
+    model = str(get_setting(settings, "LLM_MODEL", "gpt-4o"))
+    temperature = float(get_setting(settings, "LLM_TEMPERATURE", 0.0))
     try:
         logger.info("llm_init provider=%s model=%s temperature=%s", provider, model, temperature)
     except Exception:
         pass
     if provider == "openai":
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=model, temperature=temperature, streaming=True, api_key=os.getenv("LLM_API_KEY"))
+        api_key = str(get_setting(settings, "LLM_API_KEY", ""))
+        base_url = str(get_setting(settings, "OPENAI_BASE_URL", "https://api.openai.com/v1"))
+        return ChatOpenAI(model=model, temperature=temperature, streaming=True, api_key=api_key, base_url=base_url)
     elif provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=model, temperature=temperature, streaming=True, api_key=os.getenv("LLM_API_KEY"))
+        api_key = str(get_setting(settings, "LLM_API_KEY", ""))
+        return ChatAnthropic(model=model, temperature=temperature, streaming=True, api_key=api_key)
     else:
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=model, temperature=temperature, streaming=True, api_key=os.getenv("LLM_API_KEY"))
+        api_key = str(get_setting(settings, "LLM_API_KEY", ""))
+        return ChatOpenAI(model=model, temperature=temperature, streaming=True, api_key=api_key)
 
 def _build_connectors_summary(connectors: List[Connector]) -> List[Dict[str, Any]]:
     return [{"connector_id": str(c.connector_id), "connector_type": c.type} for c in connectors]
@@ -428,7 +436,7 @@ def _glossary_context_for_query(db: Session, tenant_id: UUID, query_text: str, t
     # 2) Vector semantic match
     if len(term_rows) < int(top_k_terms):
         try:
-            client = get_embeddings_client()
+            client = get_embeddings_client_for_tenant(db, str(tenant_id))
             [qvec] = client.embed([query_text])
             q_vec = text(
                 """
@@ -490,11 +498,11 @@ def run_chat_agent(db: Session, tenant_id: UUID, message: str) -> Dict[str, Any]
 def _history_for_session(session_id: str) -> InMemoryChatMessageHistory:
     """Get or create an in-memory history for a session, trimming to a window size.
     
-    CHAT_HISTORY_MAX_TURNS env var controls how many (user,assistant) pairs to retain (default 20).
+    Max turns are set per-session from tenant settings in run_chat_agent_stream.
     """
     hist = _THREAD_HISTORIES.setdefault(session_id, InMemoryChatMessageHistory())
     try:
-        max_turns = int(os.getenv("CHAT_HISTORY_MAX_TURNS", "20"))
+        max_turns = int(_SESSION_MAX_TURNS.get(session_id, 20))
         msgs = getattr(hist, "messages", None)
         if isinstance(msgs, list) and max_turns > 0:
             # Keep last 2*max_turns messages (approx pairs)
@@ -576,9 +584,16 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
         MessagesPlaceholder("agent_scratchpad"),
     ])
 
-    llm = _make_llm()
+    llm = _make_llm_for_tenant(db, tenant_id)
     agent = create_openai_tools_agent(llm, tools, prompt)
     executor = AgentExecutor(agent=agent, tools=tools, verbose=False, max_iterations=6, return_intermediate_steps=False)
+    # Configure per-session chat history window from tenant settings
+    try:
+        settings = get_tenant_settings(db, tenant_id)
+        max_turns_cfg = int(get_setting(settings, "CHAT_HISTORY_MAX_TURNS", 20))
+    except Exception:
+        max_turns_cfg = 20
+
     runnable = RunnableWithMessageHistory(
         executor,
         _history_for_session,
@@ -591,6 +606,7 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
         provided_history = thread_id
         thread_id = "__inline__"
     session_id = _session_key(tenant_id, thread_id)
+    _SESSION_MAX_TURNS[session_id] = max_turns_cfg
     if provided_history is not None:
         _THREAD_HISTORIES[session_id] = provided_history.to_langchain()
 
