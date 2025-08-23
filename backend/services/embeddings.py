@@ -37,17 +37,14 @@ class OpenAIEmbeddingsClient(EmbeddingsClient):
         resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
         resp.raise_for_status()
         data = resp.json()
-        vectors = [item["embedding"] for item in data.get("data", [])]
-        # Usage tracking (tokens may be absent; capture latency and request id if present)
+        # Preserve provider usage for caller
         try:
-            input_tokens = data.get("usage", {}).get("prompt_tokens") or None
-            output_tokens = data.get("usage", {}).get("completion_tokens") or None
-            total_tokens = data.get("usage", {}).get("total_tokens") or None
-            request_id = resp.headers.get("x-request-id") or data.get("id")
-            latency_ms = int((time.time() - t0) * 1000)
-            # We don't have db/tenant here. Caller will use tenant-scoped wrapper below.
+            self.last_usage = data.get("usage") or None
+            self.last_request_id = resp.headers.get("x-request-id") or data.get("id")
         except Exception:
-            pass
+            self.last_usage = None
+            self.last_request_id = None
+        vectors = [item["embedding"] for item in data.get("data", [])]
         if len(vectors) != len(texts):
             raise RuntimeError("Embedding count mismatch")
         return vectors
@@ -79,11 +76,15 @@ def embed_and_log(db: Session, tenant_id: str, texts: List[str], category: str |
     t0 = time.time()
     try:
         vectors = client.embed(texts)
-        logger.info("BCL: Embedding Payload %s", json.dumps(vectors.usage))
     finally:
         # Best-effort logging with minimal fields
         try:
-            # No token breakdown normally available from embeddings API; log total count if known by len(texts)
+            usage = getattr(client, "last_usage", None) or {}
+            input_tokens = None
+            total_tokens = None
+            if isinstance(usage, dict):
+                input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens") or None
+                total_tokens = usage.get("total_tokens") or None
             log_usage_event(
                 db,
                 tenant_id=tenant_id,
@@ -91,10 +92,10 @@ def embed_and_log(db: Session, tenant_id: str, texts: List[str], category: str |
                 model=model,
                 operation="embedding",
                 category=category,
-                input_tokens=None,
+                input_tokens=int(input_tokens) if input_tokens is not None else None,
                 output_tokens=None,
-                total_tokens=None,
-                request_id=None,
+                total_tokens=int(total_tokens) if total_tokens is not None else None,
+                request_id=getattr(client, "last_request_id", None),
                 latency_ms=int((time.time() - t0) * 1000),
             )
         except Exception:
