@@ -60,6 +60,9 @@ def _is_public_path(path: str) -> bool:
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
+    # Let CORS middleware handle preflight so proper headers are returned
+    if request.method == "OPTIONS":
+        return await call_next(request)
     path = request.url.path
     # Only guard API routes and allow public paths
     if path.startswith("/api/") and not _is_public_path(path):
