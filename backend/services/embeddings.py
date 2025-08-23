@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List
+from typing import List, Optional
 from services.settings import get_tenant_settings, get_setting
 from constants import (
     EMBEDDING_PROVIDER as KEY_EMBEDDING_PROVIDER,
@@ -67,7 +67,7 @@ def get_embeddings_client_for_tenant(db: Session, tenant_id: str) -> EmbeddingsC
     return get_embeddings_client_for_settings(settings)
 
 
-def embed_and_log(db: Session, tenant_id: str, texts: List[str], category: str | None = None) -> List[List[float]]:
+def embed_and_log(db: Session, tenant_id: str, texts: List[str], category: Optional[str] = None, module: Optional[str] = None) -> List[List[float]]:
     client = get_embeddings_client_for_tenant(db, tenant_id)
     settings = get_tenant_settings(db, tenant_id)
     provider = str(get_setting(settings, KEY_EMBEDDING_PROVIDER, "openai")).lower()
@@ -92,6 +92,7 @@ def embed_and_log(db: Session, tenant_id: str, texts: List[str], category: str |
                 model=model,
                 operation="embedding",
                 category=category,
+                module=module,
                 input_tokens=int(input_tokens) if input_tokens is not None else None,
                 output_tokens=None,
                 total_tokens=int(total_tokens) if total_tokens is not None else None,

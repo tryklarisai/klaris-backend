@@ -198,7 +198,7 @@ def ingest_document(
         return {"document_id": str(doc.document_id), "chunks": 0, "status": doc.status}
 
     # Embed and insert
-    vectors = embed_and_log(db, tenant_id, chunks, category="bcl_ingestion")
+    vectors = embed_and_log(db, tenant_id, chunks, category="bcl_ingestion", module="business_context")
     now = datetime.utcnow()
     created = 0
     for i, chunk_text in enumerate(chunks):

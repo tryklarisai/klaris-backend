@@ -154,7 +154,7 @@ async def import_glossary(
             texts.append(txt)
             ids.append(str(t.term_id))
         if texts:
-            vecs = embed_and_log(db, auth.tenant_id, texts, category="bcl_glossary")
+            vecs = embed_and_log(db, auth.tenant_id, texts, category="bcl_glossary", module="business_context")
             # Bulk update – best-effort per row
             for i, v in enumerate(vecs):
                 db.execute(text("UPDATE bcl_terms SET embedding = :emb WHERE term_id::text = :id"), {"emb": v, "id": ids[i]})
@@ -193,7 +193,7 @@ def search_terms(q: str = "", top_k: int = 10, db: Session = Depends(get_db), au
     # Try vector
     try:
         from services.embeddings import embed_and_log
-        [qvec] = embed_and_log(db, auth.tenant_id, [q], category="bcl_glossary")
+        [qvec] = embed_and_log(db, auth.tenant_id, [q], category="bcl_glossary", module="business_context")
         s = text(
             """
             SELECT term_id::text, term, description, 1 - (embedding <=> :qvec) AS score

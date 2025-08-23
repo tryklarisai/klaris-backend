@@ -447,7 +447,7 @@ def _glossary_context_for_query(db: Session, tenant_id: UUID, query_text: str, t
     if len(term_rows) < int(top_k_terms):
         try:
             from services.embeddings import embed_and_log
-            [qvec] = embed_and_log(db, str(tenant_id), [query_text], category="chat")
+            [qvec] = embed_and_log(db, str(tenant_id), [query_text], category="chat", module="chat_module")
             q_vec = text(
                 """
                 SELECT t.term_id::text, t.term, t.normalized_term, t.description,

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { buildApiUrl } from '../config';
 import { LineChart, Line, XAxis, YAxis, Tooltip, Legend, CartesianGrid, ResponsiveContainer, BarChart, Bar } from 'recharts';
+import { Box, FormControl, InputLabel, MenuItem, Select, SelectChangeEvent, Typography } from '@mui/material';
 
 function useAuthHeaders() {
   return React.useMemo(() => {
@@ -34,8 +35,6 @@ export default function UsagePage() {
   const [series, setSeries] = useState<any[]>([]);
   const [summary, setSummary] = useState<any | null>(null);
   const [range, setRange] = useState<string>("24h");
-  const [category, setCategory] = useState<string>("");
-  const [model, setModel] = useState<string>("");
   const tenant = useMemo(() => {
     const t = localStorage.getItem('klaris_tenant');
     return t ? JSON.parse(t) : null;
@@ -50,8 +49,7 @@ export default function UsagePage() {
       const from = computeFromISO(range, now);
       if (from) qs.set('from', from);
       qs.set('to', to);
-      if (category) qs.set('category', category);
-      if (model) qs.set('model', model);
+      // No additional filters; show overall usage for range
       const sres = await fetch(buildApiUrl(`/api/v1/usage/${tenant.tenant_id}/series?` + qs.toString()), { headers } as RequestInit);
       const sjson = await sres.json();
       const points = (sjson.series || []).map((p: any) => ({
@@ -66,40 +64,35 @@ export default function UsagePage() {
       setSummary(sumjson || null);
     }
     load();
-  }, [headers, tenant, range, category, model]);
+  }, [headers, tenant, range]);
 
   const catData = useMemo(() => (summary?.by_category || []).map((r: any) => ({ name: r.category || 'uncategorized', tokens: Number(r.total_tokens || 0) })), [summary]);
   const modelData = useMemo(() => (summary?.by_model || []).map((r: any) => ({ name: r.model || 'unknown', tokens: Number(r.total_tokens || 0) })), [summary]);
-  const categoryOptions = useMemo(() => ["", ...(summary?.by_category || []).map((r: any) => String(r.category || 'uncategorized'))], [summary]);
-  const modelOptions = useMemo(() => ["", ...(summary?.by_model || []).map((r: any) => String(r.model || 'unknown'))], [summary]);
+  const byModule = useMemo(() => (summary?.by_module || []).map((r: any) => ({ name: r.module || 'unknown', tokens: Number(r.total_tokens || 0) })), [summary]);
 
   return (
     <div style={{ padding: 24 }}>
-      <h2>Usage</h2>
-      <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
-        <label style={{ fontSize: 12, color: '#555' }}>Range</label>
-        <select value={range} onChange={(e) => setRange(e.target.value)}>
-          <option value="15m">Last 15 mins</option>
-          <option value="1h">Last 1 hour</option>
-          <option value="4h">Last 4 hours</option>
-          <option value="24h">Last 24 hours</option>
-          <option value="7d">Last 7 days</option>
-        </select>
-        <label style={{ fontSize: 12, color: '#555', marginLeft: 12 }}>Category</label>
-        <select value={category} onChange={(e) => setCategory(e.target.value)}>
-          {categoryOptions.map((c, i) => (
-            <option key={i} value={c}>{c || 'All'}</option>
-          ))}
-        </select>
-        <label style={{ fontSize: 12, color: '#555', marginLeft: 12 }}>Model</label>
-        <select value={model} onChange={(e) => setModel(e.target.value)}>
-          {modelOptions.map((m, i) => (
-            <option key={i} value={m}>{m || 'All'}</option>
-          ))}
-        </select>
-      </div>
+      <Typography variant="h5" component="h2">Usage</Typography>
+      <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap', mt: 1 }}>
+        <FormControl size="small" sx={{ minWidth: 180 }}>
+          <InputLabel id="usage-range-label">Time Range</InputLabel>
+          <Select
+            labelId="usage-range-label"
+            id="usage-range"
+            value={range}
+            label="Time Range"
+            onChange={(e: SelectChangeEvent) => setRange(String(e.target.value))}
+          >
+            <MenuItem value="15m">Last 15 mins</MenuItem>
+            <MenuItem value="1h">Last 1 hour</MenuItem>
+            <MenuItem value="4h">Last 4 hours</MenuItem>
+            <MenuItem value="24h">Last 24 hours</MenuItem>
+            <MenuItem value="7d">Last 7 days</MenuItem>
+          </Select>
+        </FormControl>
+      </Box>
       <div style={{ marginTop: 16 }}>
-        <h3>Tokens per hour (last 24h)</h3>
+        <Typography variant="subtitle1" sx={{ mb: 1 }}>Tokens per hour</Typography>
         {series.length === 0 ? (
           <div style={{ fontSize: 12, color: '#666' }}>No usage recorded.</div>
         ) : (
@@ -120,11 +113,11 @@ export default function UsagePage() {
         )}
       </div>
       <div style={{ marginTop: 24 }}>
-        <h3>Summary (last 24h)</h3>
+        <Typography variant="subtitle1" sx={{ mb: 1 }}>Summary</Typography>
         {summary && (
           <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
             <div style={{ minWidth: 360, flex: '1 1 360px', height: 280 }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>By Category</div>
+              <Typography sx={{ fontWeight: 600, mb: 1 }}>By Category</Typography>
               <ResponsiveContainer>
                 <BarChart data={catData} layout="vertical" margin={{ top: 10, right: 20, left: 20, bottom: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" />
@@ -136,7 +129,19 @@ export default function UsagePage() {
               </ResponsiveContainer>
             </div>
             <div style={{ minWidth: 360, flex: '1 1 360px', height: 280 }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>By Model</div>
+              <Typography sx={{ fontWeight: 600, mb: 1 }}>By Module</Typography>
+              <ResponsiveContainer>
+                <BarChart data={byModule} layout="vertical" margin={{ top: 10, right: 20, left: 20, bottom: 10 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis type="number" tick={{ fontSize: 10 }} />
+                  <YAxis type="category" dataKey="name" width={140} tick={{ fontSize: 11 }} />
+                  <Tooltip />
+                  <Bar dataKey="tokens" fill="#00897b" radius={4} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <div style={{ minWidth: 360, flex: '1 1 360px', height: 280 }}>
+              <Typography sx={{ fontWeight: 600, mb: 1 }}>By Model</Typography>
               <ResponsiveContainer>
                 <BarChart data={modelData} layout="vertical" margin={{ top: 10, right: 20, left: 20, bottom: 10 }}>
                   <CartesianGrid strokeDasharray="3 3" />
