@@ -1,5 +1,5 @@
 import React from 'react';
-import { Box, Stack, Paper, Typography, Alert, CircularProgress, Table, TableHead, TableRow, TableCell, TableBody, Divider, Chip, IconButton, InputBase, Tooltip, useMediaQuery, Button, Select, MenuItem, Collapse, Fab, TableContainer } from '@mui/material';
+import { Box, Stack, Paper, Typography, Alert, CircularProgress, Table, TableHead, TableRow, TableCell, TableBody, Divider, Chip, IconButton, InputBase, Tooltip, useMediaQuery, Button, Select, MenuItem, Collapse, Fab, TableContainer, Dialog, DialogTitle, DialogContent, DialogActions } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import SendRounded from '@mui/icons-material/SendRounded';
 import MicRounded from '@mui/icons-material/MicRounded';
@@ -16,6 +16,11 @@ import { useParams, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { keyframes } from '@mui/system';
+import ChartRenderer from '../components/ChartRenderer';
+import html2pdf from 'html2pdf.js';
+import ThumbUpOffAlt from '@mui/icons-material/ThumbUpOffAlt';
+import ThumbDownOffAlt from '@mui/icons-material/ThumbDownOffAlt';
+import IosShare from '@mui/icons-material/IosShare';
 
 interface RouteMeta {
   tool?: string;
@@ -32,6 +37,7 @@ interface ChatResponse {
   answer: string;
   route?: RouteMeta | null;
   data_preview?: DataPreview | null;
+  charts?: Array<{ title?: string | null; type?: string; spec: any }> | null;
 }
 
 type ThreadItem = { thread_id: string; title?: string | null };
@@ -57,6 +63,14 @@ export default function ChatPage() {
   const [tools, setTools] = React.useState<Array<{ type: 'start' | 'end'; tool: string; payload?: any }>>([]);
   const [lastUserMessage, setLastUserMessage] = React.useState<string>('');
   const [detailsOpen, setDetailsOpen] = React.useState<boolean>(false);
+  const [answerComplete, setAnswerComplete] = React.useState<boolean>(false);
+  const answerRef = React.useRef<HTMLDivElement | null>(null);
+  const [chartsRendered, setChartsRendered] = React.useState(0);
+  const chartsTotal = Array.isArray(result?.charts) ? result!.charts!.length : 0;
+  const [exporting, setExporting] = React.useState(false);
+  const [previewOpen, setPreviewOpen] = React.useState(false);
+  const [previewHtml, setPreviewHtml] = React.useState<string>("");
+  const [previewLoading, setPreviewLoading] = React.useState(false);
 
   // Thread state
   const [threads, setThreads] = React.useState<ThreadItem[]>([]);
@@ -74,6 +88,11 @@ export default function ChatPage() {
   React.useEffect(() => {
     setThreadsPanelOpen(!isMobile);
   }, [isMobile]);
+
+  React.useEffect(() => {
+    // Reset charts rendered counter when result changes
+    setChartsRendered(0);
+  }, [result?.charts]);
 
   // Sync local threadId with route param
   React.useEffect(() => {
@@ -104,6 +123,7 @@ export default function ChatPage() {
     setDraftAnswer('');
     setThoughts([]);
     setTools([]);
+    setAnswerComplete(false);
     const msg = message.trim();
     if (!msg) { setError('Please enter a question.'); return; }
     const token = window.localStorage.getItem('klaris_jwt');
@@ -162,12 +182,14 @@ export default function ChatPage() {
             const answer = String(data?.answer || '');
             const route = (data && data.route) ? data.route : null;
             const data_preview = (data && data.data_preview) ? data.data_preview : null;
-            console.log('Chat final event:', { answer, route, data_preview });
-            setResult({ answer, route, data_preview } as ChatResponse);
+            const charts = Array.isArray(data?.charts) ? data.charts : null;
+            console.log('Chat final event:', { answer, route, data_preview, charts });
+            setResult({ answer, route, data_preview, charts } as ChatResponse);
           } else if (type === 'error') {
             setError(String(data || 'Stream error'));
           } else if (type === 'done') {
             setLoading(false);
+            setAnswerComplete(true);
             // Refresh threads to pick up server-side auto-title
             try { await fetchThreads(); } catch {}
             try { window.dispatchEvent(new CustomEvent('chat:threads:changed', { detail: { type: 'updated', id: threadId } })); } catch {}
@@ -310,6 +332,102 @@ export default function ChatPage() {
     }
   }
 
+  async function exportPdf() {
+    try {
+      if (!answerRef.current) return;
+      setExporting(true);
+      // Wait briefly for charts to render if any
+      const start = Date.now();
+      const timeoutMs = 2000;
+      while (Array.isArray(result?.charts) && chartsRendered < chartsTotal && (Date.now() - start) < timeoutMs) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      const threadShort = (threadId || '').slice(0, 8);
+      const ts = new Date();
+      const y = ts.getFullYear();
+      const m = String(ts.getMonth() + 1).padStart(2, '0');
+      const d = String(ts.getDate()).padStart(2, '0');
+      const hh = String(ts.getHours()).padStart(2, '0');
+      const mm = String(ts.getMinutes()).padStart(2, '0');
+      const filename = `klaris-answer-${threadShort || 'chat'}-${y}${m}${d}-${hh}${mm}.pdf`;
+      const opt: any = {
+        margin:       10,
+        filename,
+        image:        { type: 'jpeg', quality: 0.95 },
+        html2canvas:  { scale: 2, useCORS: true, logging: false },
+        jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
+      };
+      // Clone the node and inline canvases from the live view as images
+      const clone = answerRef.current.cloneNode(true) as HTMLElement;
+      const liveCanvases = answerRef.current.querySelectorAll('canvas');
+      const cloneCanvases = clone.querySelectorAll('canvas');
+      const len = Math.min(liveCanvases.length, cloneCanvases.length);
+      for (let i = 0; i < len; i++) {
+        try {
+          const live = liveCanvases[i] as HTMLCanvasElement;
+          const url = live.toDataURL('image/png');
+          const img = document.createElement('img');
+          img.src = url;
+          (img.style as any).width = '100%';
+          (img.style as any).height = 'auto';
+          const c = cloneCanvases[i];
+          c.parentNode && c.parentNode.replaceChild(img, c);
+        } catch {}
+      }
+      // Wrap with Q/A header
+      const escapeHtml = (s: string) => String(s || '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'} as any)[ch] || ch);
+      const qa = document.createElement('div');
+      qa.innerHTML = `
+        <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;">
+          <div style="font-weight:700; font-size: 18px; margin-bottom:8px; text-align:left;">${escapeHtml(lastUserMessage)}</div>
+        </div>
+      `;
+      qa.appendChild(clone);
+      await (html2pdf() as any).set(opt).from(qa).save();
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function openPreview() {
+    if (!answerRef.current) return;
+    setPreviewLoading(true);
+    try {
+      // Build a clone with canvases inlined as images for preview
+      const clone = answerRef.current.cloneNode(true) as HTMLElement;
+      const liveCanvases = answerRef.current.querySelectorAll('canvas');
+      const cloneCanvases = clone.querySelectorAll('canvas');
+      const len = Math.min(liveCanvases.length, cloneCanvases.length);
+      for (let i = 0; i < len; i++) {
+        try {
+          const live = liveCanvases[i] as HTMLCanvasElement;
+          const url = live.toDataURL('image/png');
+          const img = document.createElement('img');
+          img.src = url;
+          (img.style as any).width = '100%';
+          (img.style as any).height = 'auto';
+          const c = cloneCanvases[i];
+          c.parentNode && c.parentNode.replaceChild(img, c);
+        } catch {}
+      }
+      const escapeHtml = (s: string) => String(s || '').replace(/[&<>"']/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'} as any)[ch] || ch);
+      const html = `
+        <div style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial;">
+          <div style=\"font-weight:700; font-size: 18px; margin-bottom:8px; text-align:left;\">${escapeHtml(lastUserMessage)}</div>
+          ${clone.innerHTML}
+        </div>
+      `;
+      setPreviewHtml(html);
+      setPreviewOpen(true);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }
+
+  function closePreview() {
+    setPreviewOpen(false);
+  }
+
   return (
     <Box sx={{ position: 'relative', py: { xs: 2, md: 4 } }}>
       {/* Background gradients */}
@@ -421,12 +539,12 @@ export default function ChatPage() {
                       </Box>
                     )}
 
-                    {/* Assistant streaming bubble */}
-                    {draftAnswer && (
+                    {/* Assistant answer bubble (streams during generation, shows final when done) */}
+                    {(draftAnswer || result?.answer) && (
                       <Box sx={{ display: 'flex', mb: 2, minWidth: 0 }}>
                         <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, flex: 1, minWidth: 0, maxWidth: '100%', bgcolor: theme.palette.background.paper }}>
                           <Typography variant="subtitle2" sx={{ mb: 1.5, display: 'flex', alignItems: 'center', gap: 1 }}>
-                            {loading ? (
+                            {loading && draftAnswer ? (
                               <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.75 }}>
                                 <Box sx={(theme) => ({ width: 8, height: 8, borderRadius: '50%', background: `linear-gradient(135deg, ${theme.palette.primary.light}, ${theme.palette.primary.main})`, animation: `${bounce} 1.2s infinite ease-in-out`, animationDelay: '0s' })} />
                                 <Box sx={(theme) => ({ width: 8, height: 8, borderRadius: '50%', background: `linear-gradient(135deg, ${theme.palette.primary.light}, ${theme.palette.primary.main})`, animation: `${bounce} 1.2s infinite ease-in-out`, animationDelay: '0.15s' })} />
@@ -437,26 +555,77 @@ export default function ChatPage() {
                             )}
                           </Typography>
                           <Divider sx={{ mb: 1.5 }} />
-                          <Box sx={{
-                            overflowX: 'auto',
-                            maxWidth: '100%',
-                            wordBreak: 'break-word',
-                            overflowWrap: 'anywhere',
-                            WebkitOverflowScrolling: 'touch',
-                            '& p': { m: 0 },
-                            '& pre': { p: 1, borderRadius: 1, overflow: 'auto', maxWidth: '100%', bgcolor: theme.palette.mode === 'light' ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.06)' },
-                            '& code': { whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
-                            '& table': { display: 'block', width: 'max-content', maxWidth: 'none', minWidth: 640, borderCollapse: 'collapse', tableLayout: 'auto' },
-                            '& th, & td': { border: `1px solid ${theme.palette.divider}`, padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap', wordBreak: 'normal', overflowWrap: 'normal' },
-                            '& img': { maxWidth: '100%', height: 'auto' }
-                          }}>
-                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                              {draftAnswer}
-                            </ReactMarkdown>
+                          {/* Removed top buttons per request */}
+                          {/* Wrapper for export: includes answer text + charts */}
+                          <Box ref={answerRef}>
+                            <Box sx={{
+                              overflowX: 'auto',
+                              maxWidth: '100%',
+                              wordBreak: 'break-word',
+                              overflowWrap: 'anywhere',
+                              WebkitOverflowScrolling: 'touch',
+                              '& p': { m: 0 },
+                              '& pre': { p: 1, borderRadius: 1, overflow: 'auto', maxWidth: '100%', bgcolor: theme.palette.mode === 'light' ? 'rgba(0,0,0,0.04)' : 'rgba(255,255,255,0.06)' },
+                              '& code': { whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
+                              '& table': { display: 'block', width: 'max-content', maxWidth: 'none', minWidth: 640, borderCollapse: 'collapse', tableLayout: 'auto' },
+                              '& th, & td': { border: `1px solid ${theme.palette.divider}`, padding: '4px 8px', verticalAlign: 'top', whiteSpace: 'nowrap', wordBreak: 'normal', overflowWrap: 'normal' },
+                              '& img': { maxWidth: '100%', height: 'auto' }
+                            }}>
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {draftAnswer || result?.answer || ''}
+                              </ReactMarkdown>
+                            </Box>
+
+                            {/* Inline charts directly under answer text */}
+                            {answerComplete && Array.isArray(result?.charts) && result!.charts!.length > 0 && (
+                              <Box sx={{ mt: 2 }}>
+                                <Stack spacing={2}>
+                                  {result!.charts!.map((c, i) => (
+                                    <Paper key={i} variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
+                                      {c.title && <Typography variant="subtitle2" sx={{ mb: 1 }}>{c.title}</Typography>}
+                                      {c && (c as any).spec && <ChartRenderer spec={(c as any).spec} onRendered={() => setChartsRendered(n => n + 1)} />}
+                                    </Paper>
+                                  ))}
+                                </Stack>
+                              </Box>
+                            )}
+
                           </Box>
+                          {/* Inline actions: like, dislike, export (left aligned). Not part of export content */}
+                          {(result?.answer || draftAnswer) && (
+                            <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                              <Tooltip title="Like">
+                                <span>
+                                  <IconButton size="small" disabled={loading}>
+                                    <ThumbUpOffAlt fontSize="small" />
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
+                              <Tooltip title="Dislike">
+                                <span>
+                                  <IconButton size="small" disabled={loading}>
+                                    <ThumbDownOffAlt fontSize="small" />
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
+                              <Tooltip title="Export PDF">
+                                <span>
+                                  <IconButton size="small" onClick={openPreview} disabled={previewLoading || exporting}>
+                                    <IosShare fontSize="small" />
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
+                              {(previewLoading || exporting) && (
+                                <Typography variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>
+                                  {previewLoading ? 'Preparing…' : 'Exporting…'}
+                                </Typography>
+                              )}
+                            </Box>
+                          )}
                         </Paper>
                       </Box>
                     )}
+
                     {/* Details */}
                     {(result?.route || thoughts.length > 0 || tools.length > 0 || result?.data_preview) && (
                       <Paper variant="outlined" sx={{ p: 2, mb: 2, borderRadius: 3 }}>
@@ -526,7 +695,7 @@ export default function ChatPage() {
                   </Box>
                 )}
 
-                {/* Input bar */}
+                {/* Input bar + bottom actions */}
                 <Paper
                   component="form"
                   onSubmit={sendMessage}
@@ -573,6 +742,7 @@ export default function ChatPage() {
                     </span>
                   </Tooltip>
                 </Paper>
+                {/* Bottom actions removed per request */}
               </Box>
             </Stack>
           )}
@@ -583,6 +753,29 @@ export default function ChatPage() {
           </Fab>
         )}
       </Box>
+      <ChatPdfPreview
+        open={previewOpen}
+        html={previewHtml}
+        onClose={closePreview}
+        onExport={() => { closePreview(); setTimeout(() => exportPdf(), 0); }}
+      />
     </Box>
+  );
+}
+
+// Preview dialog at root to avoid clipping inside paper
+// Note: We place it after component to keep file organization simple
+export function ChatPdfPreview({ open, html, onClose, onExport }: { open: boolean; html: string; onClose: () => void; onExport: () => void }) {
+  return (
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
+      <DialogTitle>Preview</DialogTitle>
+      <DialogContent dividers>
+        <Box sx={{ '& img': { maxWidth: '100%' } }} dangerouslySetInnerHTML={{ __html: html }} />
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Close</Button>
+        <Button variant="contained" onClick={onExport}>Download PDF</Button>
+      </DialogActions>
+    </Dialog>
   );
 }

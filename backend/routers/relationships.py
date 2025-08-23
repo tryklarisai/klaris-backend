@@ -746,7 +746,7 @@ def index_search(
     check_auth_and_tenant(credentials, tenant_id)
     # Embed query
     from services.indexer import _embed_texts  # reuse internal helper
-    vec = _embed_texts([q])[0]
+    vec = _embed_texts(db, tenant_id, [q])[0]
     # Cosine distance search using SQLAlchemy Core with pgvector Vector type
     md = MetaData()
     vector_cards = Table(

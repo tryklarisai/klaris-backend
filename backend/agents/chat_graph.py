@@ -11,6 +11,7 @@ import os, json, logging, re
 from uuid import UUID
 from sqlalchemy.orm import Session
 from sqlalchemy import text, bindparam
+from datetime import datetime
 
 from models.connector import Connector
 from models.schema_review import GlobalCanonicalSchema
@@ -500,6 +501,183 @@ def _glossary_context_for_query(db: Session, tenant_id: UUID, query_text: str, t
         })
     return {"terms": terms}
 
+
+def _extract_chart_intent(message: str) -> Dict[str, Any]:
+    """Detect if user asked for a chart and infer desired type if hinted.
+    Returns { want_chart: bool, type_hint: Optional[str] } where type_hint in {bar,line,area,scatter}.
+    """
+    try:
+        m = (message or "").lower()
+        want = any(k in m for k in ("chart", "plot", "graph", "visual", "visualize", "visualisation", "visualization"))
+        type_hint = None
+        for k in ("bar", "line", "area", "scatter"):
+            if k in m:
+                type_hint = k
+                break
+        return {"want_chart": want or (type_hint is not None), "type_hint": type_hint}
+    except Exception:
+        return {"want_chart": False, "type_hint": None}
+
+
+def _is_numeric(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        try:
+            float(value)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _is_temporal(value: Any) -> bool:
+    if isinstance(value, (int, float)):
+        # Treat pure numbers as non-temporal (skip epoch heuristics for simplicity)
+        return False
+    if isinstance(value, str):
+        s = value.strip()
+        # Quick ISO-like patterns
+        if re.match(r"^\d{4}-\d{2}-\d{2}", s):
+            return True
+        try:
+            # Fallback to ISO parse
+            datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _build_charts_from_preview(message: str, preview: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build minimal Vega-Lite chart specs from data preview based on simple heuristics.
+    Returns a list of { title?, type: 'vega-lite', spec }.
+    """
+    if not isinstance(preview, dict):
+        return []
+    columns = preview.get("columns") or []
+    rows = preview.get("rows") or []
+    if not isinstance(columns, list) or not isinstance(rows, list) or not columns or not rows:
+        return []
+
+    intent = _extract_chart_intent(message)
+    if not intent.get("want_chart"):
+        return []
+
+    # Infer column types by sampling
+    sample = rows[:50]
+    num_cols: List[str] = []
+    temporal_cols: List[str] = []
+    cat_cols: List[str] = []
+    for idx, col in enumerate(columns):
+        col_values = [r[idx] for r in sample if isinstance(r, list) and len(r) > idx]
+        num_count = sum(1 for v in col_values if _is_numeric(v))
+        temp_count = sum(1 for v in col_values if _is_temporal(v))
+        if num_count >= max(1, len(col_values) // 2):
+            num_cols.append(str(col))
+        elif temp_count >= max(1, len(col_values) // 2) or str(col).lower() in ("date", "day", "month", "year", "timestamp", "created_at", "updated_at"):
+            temporal_cols.append(str(col))
+        else:
+            cat_cols.append(str(col))
+
+    # Build records for values
+    values: List[Dict[str, Any]] = []
+    for r in sample:
+        if not isinstance(r, list):
+            continue
+        obj: Dict[str, Any] = {}
+        for i, c in enumerate(columns):
+            if i < len(r):
+                obj[str(c)] = r[i]
+        if obj:
+            values.append(obj)
+
+    charts: List[Dict[str, Any]] = []
+    type_hint = intent.get("type_hint")
+
+    def add_chart(spec: Dict[str, Any], title: Optional[str] = None):
+        charts.append({"title": title, "type": "vega-lite", "spec": spec})
+
+    # Prefer temporal line/area when available
+    if temporal_cols and num_cols:
+        x = temporal_cols[0]
+        nums = num_cols[:4]  # cap series
+        if len(nums) > 1:
+            # Fold to long for multi-series
+            spec = {
+                "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+                "data": {"values": values},
+                "transform": [{"fold": nums, "as": ["series", "value"]}],
+                "mark": {"type": ("area" if type_hint == "area" else "line"), "tooltip": True},
+                "encoding": {
+                    "x": {"field": x, "type": "temporal"},
+                    "y": {"field": "value", "type": "quantitative"},
+                    "color": {"field": "series", "type": "nominal"}
+                }
+            }
+        else:
+            spec = {
+                "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+                "data": {"values": values},
+                "mark": {"type": ("area" if type_hint == "area" else "line"), "tooltip": True},
+                "encoding": {
+                    "x": {"field": x, "type": "temporal"},
+                    "y": {"field": nums[0], "type": "quantitative"}
+                }
+            }
+        add_chart(spec, title=None)
+        return charts
+
+    # Scatter if user asked and we have 2 numeric columns
+    if type_hint == "scatter" and len(num_cols) >= 2:
+        x, y = num_cols[0], num_cols[1]
+        spec = {
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "data": {"values": values},
+            "mark": {"type": "point", "tooltip": True},
+            "encoding": {
+                "x": {"field": x, "type": "quantitative"},
+                "y": {"field": y, "type": "quantitative"}
+            }
+        }
+        add_chart(spec, title=None)
+        return charts
+
+    # Bar for categorical + numeric
+    if cat_cols and num_cols:
+        x = cat_cols[0]
+        y = num_cols[0]
+        spec = {
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "data": {"values": values},
+            "mark": {"type": "bar", "tooltip": True} if (type_hint in (None, "bar")) else {"type": "bar", "tooltip": True},
+            "encoding": {
+                "x": {"field": x, "type": "nominal", "sort": "-y"},
+                "y": {"field": y, "type": "quantitative"}
+            }
+        }
+        add_chart(spec, title=None)
+        return charts
+
+    # Fallback: if at least 2 numeric columns, scatter
+    if len(num_cols) >= 2:
+        x, y = num_cols[0], num_cols[1]
+        spec = {
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "data": {"values": values},
+            "mark": {"type": "point", "tooltip": True},
+            "encoding": {
+                "x": {"field": x, "type": "quantitative"},
+                "y": {"field": y, "type": "quantitative"}
+            }
+        }
+        add_chart(spec, title=None)
+        return charts
+
+    return []
+
 def run_chat_agent(db: Session, tenant_id: UUID, message: str) -> Dict[str, Any]:
     raise RuntimeError(
         "run_chat_agent() has been removed. Use run_chat_agent_stream() and aggregate its events for a final response."
@@ -545,6 +723,9 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
         "Then outline a short, structured plan of the logical steps you will follow. "
         "As you execute tool calls, narrate progress succinctly and sequentially. "
         "Finish by summarizing the completed work distinctly from your upfront plan. "
+        "If the user asks for a chart/graph/plot, you MUST run the appropriate read tool(s) to produce a compact table (e.g., period vs metric) suitable for plotting, with small LIMITs. "
+        "Do NOT say that you cannot create charts; the application will render charts from your tabular result. "
+        "For time ranges like 'last 3 quarters', compute those periods and aggregate accordingly. "
         "After gathering, produce a concise final answer to the user. Do not output JSON; respond with natural language."
     )
 
@@ -567,6 +748,7 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
     tools = make_generic_tools(connectors, connector_schemas, on_rows=_on_rows)
 
     glossary_ctx = _glossary_context_for_query(db, tenant_id, message)
+    chart_intent = _extract_chart_intent(message)
 
     payload = {
         "tenant_id": str(tenant_id),
@@ -575,12 +757,21 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
         "connector_schemas": connector_schemas,
         "connector_capabilities": connector_capabilities,
         "glossary_context": glossary_ctx,
+        "chart_intent": chart_intent,
     }
 
     context_json = json.dumps(payload)
     prompt = ChatPromptTemplate.from_messages([
         ("system", agent_instructions),
         ("system", "Context for tools and planning (JSON): {context}"),
+        ("system", "Charting rules (Result Contract): If chart_intent.want_chart is true, your **final tool call** MUST return a small, aggregated table in one of these shapes:\n"
+                    "A) [x, y] where x is temporal OR categorical, and y is a single numeric aggregate (COUNT/SUM/AVG). 5–100 rows.\n"
+                    "B) [x, series, value] where x is temporal OR categorical, series is a short label, and value is numeric. 5–100 rows.\n"
+                    "Do NOT return entity-level rows (ids/emails/order lines). Use GROUP BY and aggregations. If you cannot determine the aggregation, ask one brief clarification before calling tools.\n"
+                    "SQL examples:\n"
+                    " - Temporal: SELECT date_trunc('month', created_at) AS period, COUNT(*) AS orders FROM sales.orders GROUP BY 1 ORDER BY 1 LIMIT 100\n"
+                    " - Categorical: SELECT status AS x, COUNT(*) AS y FROM tickets GROUP BY 1 ORDER BY 2 DESC LIMIT 50\n"
+                    " - Multi-series: SELECT date_trunc('week', created_at) AS period, channel AS series, COUNT(*) AS value FROM events GROUP BY 1,2 ORDER BY 1 LIMIT 100\n"),
         ("system", "If glossary_context.terms contains any term mentioned or implied by the user, you MUST use the provided mappings exactly (expressions/filters) and MUST NOT substitute alternative definitions. "
                    "Prefer mappings with higher confidence. When you explain your answer, concisely reflect the provided rationale where helpful. "
                    "If no mappings are given for a relevant term, ask a brief clarification rather than assuming a definition."),
@@ -673,6 +864,7 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
 
     usage_cb = _UsageCapture()
 
+    charts_payload: Optional[List[Dict[str, Any]]] = None
     try:
         # Send an initial event to prompt clients to render immediately
         yield "event: ready\ndata: {}\n\n"
@@ -788,11 +980,37 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
                 yield f"event: thought\ndata: {json.dumps({'log': str(log)})}\n\n"
             elif etype == "on_chain_end":
                 final = data.get("output", "")
+                # Sanitize common disclaimers about charting since the app renders charts
+                try:
+                    fs = str(final)
+                    lower = fs.lower()
+                    bad_phrases = [
+                        "can't create visual",
+                        "cannot create visual",
+                        "can't create charts",
+                        "cannot create charts",
+                        "can't create a chart",
+                        "cannot create a chart",
+                    ]
+                    if any(p in lower for p in bad_phrases):
+                        fs = re.sub(r"(?i)\b(can('|’)t|cannot)\s+create\s+(visual|chart|charts)[^\.]*\.?\s*", "", fs).strip()
+                        if not fs:
+                            fs = "Here is a concise summary based on your request."
+                        final = fs
+                except Exception:
+                    pass
                 payload = {"answer": str(final)}
                 if route_meta:
                     payload["route"] = route_meta
                 if data_preview and isinstance(data_preview, dict) and data_preview.get("columns") is not None:
                     payload["data_preview"] = data_preview
+                # Server-driven chart generation (based on user message and preview)
+                try:
+                    charts_payload = _build_charts_from_preview(message, data_preview)
+                    if charts_payload:
+                        payload["charts"] = charts_payload
+                except Exception:
+                    charts_payload = None
                 yield f"event: final\ndata: {json.dumps(payload)}\n\n"
     except Exception as e:
         logger.exception("astream_events failed: %s", e)

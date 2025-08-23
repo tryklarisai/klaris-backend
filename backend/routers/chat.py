@@ -47,6 +47,7 @@ class ChatResponse(BaseModel):
     answer: str
     route: Optional[RouteMeta] = None
     data_preview: Optional[DataPreview] = None
+    charts: Optional[list[dict]] = None
     plans: Optional[List[Dict[str, Any]]] = None
     clarifications: Optional[List[str]] = None
 
@@ -124,6 +125,36 @@ async def chat_endpoint(
                     dp = payload.get("data_preview") if isinstance(payload, dict) else None
                     if isinstance(dp, dict):
                         data_preview = dp
+                    # Optional charts passthrough with basic validation limits
+                    ch = payload.get("charts") if isinstance(payload, dict) else None
+                    if isinstance(ch, list):
+                        safe_charts: list[dict] = []
+                        for item in ch[:3]:  # cap number of charts
+                            if not isinstance(item, dict):
+                                continue
+                            spec = item.get("spec")
+                            if not isinstance(spec, dict):
+                                continue
+                            # size limit
+                            try:
+                                if len(json.dumps(spec)) > 100_000:
+                                    continue
+                            except Exception:
+                                continue
+                            # whitelist minimal top-level keys
+                            allowed_top = {"$schema", "data", "mark", "encoding", "width", "height", "transform", "layer", "vconcat", "hconcat", "title", "resolve", "facet"}
+                            if not all((k in allowed_top) for k in spec.keys() if isinstance(k, str)):
+                                # allow but ignore unknown keys by filtering
+                                spec = {k: v for k, v in spec.items() if isinstance(k, str) and k in allowed_top}
+                            safe_charts.append({
+                                "title": item.get("title"),
+                                "type": "vega-lite",
+                                "spec": spec,
+                            })
+                        if safe_charts:
+                            if 'charts' not in locals():
+                                charts = []  # type: ignore
+                            charts = safe_charts  # type: ignore
             elif ev == "error":
                 data_line = next((ln for ln in lines if ln.startswith("data:")), None)
                 detail = None
@@ -168,6 +199,7 @@ async def chat_endpoint(
         answer=answer,
         route=route_model,
         data_preview=dp_model,
+        charts=locals().get('charts'),
         plans=[],
         clarifications=[],
     )
