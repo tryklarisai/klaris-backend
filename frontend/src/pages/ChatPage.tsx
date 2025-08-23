@@ -15,6 +15,7 @@ import { buildApiUrl } from '../config';
 import { useParams, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { keyframes } from '@mui/system';
 
 interface RouteMeta {
   tool?: string;
@@ -35,6 +36,12 @@ interface ChatResponse {
 
 type ThreadItem = { thread_id: string; title?: string | null };
 
+// Simple bounce animation for the three streaming dots
+const bounce = keyframes`
+  0%, 80%, 100% { transform: scale(0); opacity: 0.5; }
+  40% { transform: scale(1); opacity: 1; }
+`;
+
 export default function ChatPage() {
   const theme = useTheme();
   const isMobile = useMediaQuery('(max-width:900px)');
@@ -49,6 +56,7 @@ export default function ChatPage() {
   const [thoughts, setThoughts] = React.useState<string[]>([]);
   const [tools, setTools] = React.useState<Array<{ type: 'start' | 'end'; tool: string; payload?: any }>>([]);
   const [lastUserMessage, setLastUserMessage] = React.useState<string>('');
+  const [detailsOpen, setDetailsOpen] = React.useState<boolean>(false);
 
   // Thread state
   const [threads, setThreads] = React.useState<ThreadItem[]>([]);
@@ -417,8 +425,16 @@ export default function ChatPage() {
                     {draftAnswer && (
                       <Box sx={{ display: 'flex', mb: 2, minWidth: 0 }}>
                         <Paper variant="outlined" sx={{ p: 2, borderRadius: 3, flex: 1, minWidth: 0, maxWidth: '100%', bgcolor: theme.palette.background.paper }}>
-                          <Typography variant="subtitle2" sx={{ mb: 1.5 }}>
-                            Answer (streaming…)
+                          <Typography variant="subtitle2" sx={{ mb: 1.5, display: 'flex', alignItems: 'center', gap: 1 }}>
+                            {loading ? (
+                              <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.75 }}>
+                                <Box sx={(theme) => ({ width: 8, height: 8, borderRadius: '50%', background: `linear-gradient(135deg, ${theme.palette.primary.light}, ${theme.palette.primary.main})`, animation: `${bounce} 1.2s infinite ease-in-out`, animationDelay: '0s' })} />
+                                <Box sx={(theme) => ({ width: 8, height: 8, borderRadius: '50%', background: `linear-gradient(135deg, ${theme.palette.primary.light}, ${theme.palette.primary.main})`, animation: `${bounce} 1.2s infinite ease-in-out`, animationDelay: '0.15s' })} />
+                                <Box sx={(theme) => ({ width: 8, height: 8, borderRadius: '50%', background: `linear-gradient(135deg, ${theme.palette.primary.light}, ${theme.palette.primary.main})`, animation: `${bounce} 1.2s infinite ease-in-out`, animationDelay: '0.3s' })} />
+                              </Box>
+                            ) : (
+                              'Answer'
+                            )}
                           </Typography>
                           <Divider sx={{ mb: 1.5 }} />
                           <Box sx={{
@@ -441,39 +457,62 @@ export default function ChatPage() {
                         </Paper>
                       </Box>
                     )}
-
-                    {/* Route metadata */}
-                    {result?.route && (
+                    {/* Details */}
+                    {(result?.route || thoughts.length > 0 || tools.length > 0 || result?.data_preview) && (
                       <Paper variant="outlined" sx={{ p: 2, mb: 2, borderRadius: 3 }}>
                         <Stack direction="row" spacing={1} flexWrap="wrap" alignItems="center">
                           <Typography variant="subtitle2" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            <BoltRounded fontSize="small" color="primary" /> Tool Route
+                            <BoltRounded fontSize="small" color="primary" /> Details
                           </Typography>
                           <Box sx={{ flex: 1 }} />
-                          {result.route.tool && <Chip size="small" label={`tool: ${result.route.tool}`} />}
-                          {result.route.connector_type && <Chip size="small" label={`type: ${result.route.connector_type}`} />}
-                          {result.route.connector_id && <Chip size="small" label={`connector: ${result.route.connector_id}`} />}
+                          <IconButton size="small" onClick={() => setDetailsOpen(v => !v)}>
+                            {detailsOpen ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
+                          </IconButton>
                         </Stack>
-                      </Paper>
-                    )}
-
-                    {/* Agent Progress */}
-                    {(thoughts.length > 0 || tools.length > 0) && (
-                      <Paper variant="outlined" sx={{ p: 2, mb: 2, borderRadius: 3 }}>
-                        <Typography variant="subtitle2" sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
-                          <BoltRounded fontSize="small" color="primary" /> Agent Progress
-                        </Typography>
-                        <Divider sx={{ mb: 1.5 }} />
-                        <Box>
-                          {thoughts.map((t, i) => (
-                            <Typography key={i} variant="body2" sx={{ color: 'text.secondary', mb: 0.5 }}>• {t}</Typography>
-                          ))}
-                          {tools.map((ev, i) => (
-                            <Typography key={`tool-${i}`} variant="caption" sx={{ display: 'block', color: 'text.disabled' }}>
-                              [{ev.type === 'start' ? 'tool_start' : 'tool_end'}] {ev.tool}
-                            </Typography>
-                          ))}
-                        </Box>
+                        <Collapse in={detailsOpen}>
+                          {result?.route && (
+                            <Stack direction="row" spacing={1} flexWrap="wrap" alignItems="center" sx={{ mb: 1.5 }}>
+                              {result.route.tool && <Chip size="small" label={`tool: ${result.route.tool}`} />}
+                              {result.route.connector_type && <Chip size="small" label={`type: ${result.route.connector_type}`} />}
+                              {result.route.connector_id && <Chip size="small" label={`connector: ${result.route.connector_id}`} />}
+                            </Stack>
+                          )}
+                          {(thoughts.length > 0 || tools.length > 0) && (
+                            <Box sx={{ mb: 1.5 }}>
+                              <Typography variant="body2" sx={{ color: 'text.secondary', mb: 0.5 }}>Agent Progress:</Typography>
+                              {thoughts.map((t, i) => (
+                                <Typography key={i} variant="body2" sx={{ color: 'text.secondary', mb: 0.5 }}>• {t}</Typography>
+                              ))}
+                              {tools.map((ev, i) => (
+                                <Typography key={`tool-${i}`} variant="caption" sx={{ display: 'block', color: 'text.disabled' }}>
+                                  [{ev.type === 'start' ? 'tool_start' : 'tool_end'}] {ev.tool}
+                                </Typography>
+                              ))}
+                            </Box>
+                          )}
+                          {result?.data_preview && (
+                            <TableContainer>
+                              <Table size="small">
+                                <TableHead>
+                                  <TableRow>
+                                    {result.data_preview.columns.map((col, i) => (
+                                      <TableCell key={i}>{col}</TableCell>
+                                    ))}
+                                  </TableRow>
+                                </TableHead>
+                                <TableBody>
+                                  {result.data_preview.rows.map((row, i) => (
+                                    <TableRow key={i}>
+                                      {row.map((cell, j) => (
+                                        <TableCell key={j}>{cell}</TableCell>
+                                      ))}
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </Table>
+                            </TableContainer>
+                          )}
+                        </Collapse>
                       </Paper>
                     )}
                   </Box>
