@@ -34,6 +34,8 @@ import ExpandMore from '@mui/icons-material/ExpandMore';
 import DeleteOutlineRounded from '@mui/icons-material/DeleteOutlineRounded';
 import AddRounded from '@mui/icons-material/AddRounded';
 import { ModeContext } from "../theme/ThemeProvider";
+import { SnackbarContext } from "../ui/SnackbarProvider";
+import { getToken, isTokenExpired, clearAuthStorage } from "../utils/auth";
 import { config, buildApiUrl } from "../config";
 
 const drawerWidth = 260;
@@ -66,6 +68,7 @@ export default function DashboardLayout() {
   const isMobile = useMediaQuery('(max-width:900px)');
   const [mobileOpen, setMobileOpen] = React.useState(false);
   const { mode, toggleMode } = React.useContext(ModeContext);
+  const { notify } = React.useContext(SnackbarContext);
 
   const [chatExpanded, setChatExpanded] = React.useState(true);
   const [threads, setThreads] = React.useState<ThreadItem[]>([]);
@@ -115,6 +118,26 @@ export default function DashboardLayout() {
   }, []);
 
   React.useEffect(() => { fetchThreads(); }, [fetchThreads]);
+
+  // Auth guard: check token on route change and on mount
+  React.useEffect(() => {
+    const token = getToken();
+    if (!token || isTokenExpired(token)) {
+      clearAuthStorage();
+      notify('Your session has expired. Please login again.', 'warning');
+      navigate('/login', { replace: true });
+    }
+    // Also set up periodic check (every 60s)
+    const id = window.setInterval(() => {
+      const t = getToken();
+      if (!t || isTokenExpired(t)) {
+        clearAuthStorage();
+        notify('Your session has expired. Please login again.', 'warning');
+        navigate('/login', { replace: true });
+      }
+    }, 60000);
+    return () => window.clearInterval(id);
+  }, [location.pathname, navigate, notify]);
 
   // Refresh threads in sidebar when ChatPage creates/deletes threads
   React.useEffect(() => {
