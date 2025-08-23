@@ -39,12 +39,12 @@ import { config, buildApiUrl } from "../config";
 const drawerWidth = 260;
 
 const mainMenu = [
-  { key: "dashboard", label: "Dashboard", path: "/", icon: <DashboardIcon fontSize="small" /> },
+  { key: "chat", label: "Chat", path: "/chat", icon: <ChatIcon fontSize="small" /> },
+  { key: "dashboard", label: "Dashboard", path: "/dashboard", icon: <DashboardIcon fontSize="small" /> },
   { key: "connectors", label: "Connectors", path: "/connectors", icon: <ExtensionIcon fontSize="small" /> },
   { key: "relationships", label: "Data Relationships", path: "/relationships", icon: <SchemaIcon fontSize="small" /> },
   { key: "bcl", label: "Business Context", path: "/bcl", icon: <LibraryBooksIcon fontSize="small" /> },
-  { key: "usage", label: "Usage", path: "/usage", icon: <SchemaIcon fontSize="small" /> },
-  { key: "chat", label: "Chat", path: "/chat", icon: <ChatIcon fontSize="small" /> }
+  { key: "usage", label: "Usage", path: "/usage", icon: <SchemaIcon fontSize="small" /> }
 ];
 
 type ThreadItem = { thread_id: string; title?: string | null };
@@ -54,14 +54,14 @@ export default function DashboardLayout() {
   const location = useLocation();
   const activeKey = React.useMemo(() => {
     const p = location.pathname || '';
-    if (p === '/' || p.startsWith('/dashboard')) return 'dashboard';
+    if (p === '/' || p.startsWith('/chat')) return 'chat';
+    if (p.startsWith('/dashboard')) return 'dashboard';
     if (p.startsWith('/connectors')) return 'connectors';
     if (p.startsWith('/relationships')) return 'relationships';
-    if (p.startsWith('/chat')) return 'chat';
     if (p.startsWith('/usage')) return 'usage';
     if (p.startsWith('/bcl')) return 'bcl';
     if (p.startsWith('/profile')) return 'profile';
-    return 'dashboard';
+    return 'chat';
   }, [location.pathname]);
   const isMobile = useMediaQuery('(max-width:900px)');
   const [mobileOpen, setMobileOpen] = React.useState(false);
@@ -166,6 +166,9 @@ export default function DashboardLayout() {
 
   const drawer = (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      {/* Spacer to avoid AppBar overlap (two toolbars in AppBar) */}
+      <Toolbar />
+      <Toolbar />
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, p: 2 }}>
         <Avatar src={config.logoUrl} sx={{ width: 28, height: 28 }} />
         <Typography variant="h6" noWrap>{config.brandName}</Typography>
@@ -270,7 +273,7 @@ export default function DashboardLayout() {
         <Toolbar sx={{ px: 3 }}>
           <Breadcrumbs aria-label="breadcrumb">
             <MuiLink color="inherit" onClick={() => navigate('/')} underline="hover" sx={{ cursor: 'pointer' }}>Home</MuiLink>
-            {activeKey !== 'dashboard' && <Typography color="text.primary">{activeKey}</Typography>}
+            {activeKey !== 'chat' && <Typography color="text.primary">{activeKey}</Typography>}
           </Breadcrumbs>
         </Toolbar>
       </AppBar>

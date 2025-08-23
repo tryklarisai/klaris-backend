@@ -23,7 +23,7 @@ function App() {
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/" element={<DashboardLayout />}>
-              <Route index element={<DashboardPage />} />
+              <Route index element={<ChatPage />} />
               <Route path="dashboard" element={<DashboardPage />} />
               <Route path="connectors" element={<ConnectorsPage />} />
               <Route path="connectors/:connectorId" element={<ConnectorDetailPage />} />
@@ -34,7 +34,7 @@ function App() {
               <Route path="chat" element={<ChatPage />} />
               <Route path="chat/:threadId" element={<ChatPage />} />
             </Route>
-            <Route path="*" element={<Navigate to="/dashboard" replace />} />
+            <Route path="*" element={<Navigate to="/chat" replace />} />
           </Routes>
         </Router>
       </SnackbarProvider>
