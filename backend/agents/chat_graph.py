@@ -816,6 +816,7 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
                 model=model,
                 operation="chat",
                 category="chat",
+                module="chat_module",
                 input_tokens=int(usage_cb.input_tokens or usage_input) if (usage_cb.input_tokens or usage_input) else None,
                 output_tokens=int(usage_cb.output_tokens or usage_output) if (usage_cb.output_tokens or usage_output) else None,
                 total_tokens=int(usage_cb.total_tokens or usage_total) if (usage_cb.total_tokens or usage_total) else None,

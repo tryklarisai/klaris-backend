@@ -16,10 +16,26 @@ function useAuthHeaders() {
   }, []);
 }
 
+function computeFromISO(range: string, now: Date): string | null {
+  const ms = {
+    '15m': 15 * 60 * 1000,
+    '1h': 1 * 60 * 60 * 1000,
+    '4h': 4 * 60 * 60 * 1000,
+    '24h': 24 * 60 * 60 * 1000,
+    '7d': 7 * 24 * 60 * 60 * 1000,
+  } as const;
+  const delta = (ms as any)[range] ?? ms['24h'];
+  const from = new Date(now.getTime() - delta);
+  return from.toISOString();
+}
+
 export default function UsagePage() {
   const headers = useAuthHeaders();
   const [series, setSeries] = useState<any[]>([]);
   const [summary, setSummary] = useState<any | null>(null);
+  const [range, setRange] = useState<string>("24h");
+  const [category, setCategory] = useState<string>("");
+  const [model, setModel] = useState<string>("");
   const tenant = useMemo(() => {
     const t = localStorage.getItem('klaris_tenant');
     return t ? JSON.parse(t) : null;
@@ -30,10 +46,12 @@ export default function UsagePage() {
       if (!tenant?.tenant_id) return;
       const qs = new URLSearchParams();
       const now = new Date();
-      const from = new Date(now.getTime() - 24 * 3600 * 1000).toISOString();
       const to = now.toISOString();
-      qs.set('from', from);
+      const from = computeFromISO(range, now);
+      if (from) qs.set('from', from);
       qs.set('to', to);
+      if (category) qs.set('category', category);
+      if (model) qs.set('model', model);
       const sres = await fetch(buildApiUrl(`/api/v1/usage/${tenant.tenant_id}/series?` + qs.toString()), { headers } as RequestInit);
       const sjson = await sres.json();
       const points = (sjson.series || []).map((p: any) => ({
@@ -48,14 +66,38 @@ export default function UsagePage() {
       setSummary(sumjson || null);
     }
     load();
-  }, [headers, tenant]);
+  }, [headers, tenant, range, category, model]);
 
   const catData = useMemo(() => (summary?.by_category || []).map((r: any) => ({ name: r.category || 'uncategorized', tokens: Number(r.total_tokens || 0) })), [summary]);
   const modelData = useMemo(() => (summary?.by_model || []).map((r: any) => ({ name: r.model || 'unknown', tokens: Number(r.total_tokens || 0) })), [summary]);
+  const categoryOptions = useMemo(() => ["", ...(summary?.by_category || []).map((r: any) => String(r.category || 'uncategorized'))], [summary]);
+  const modelOptions = useMemo(() => ["", ...(summary?.by_model || []).map((r: any) => String(r.model || 'unknown'))], [summary]);
 
   return (
     <div style={{ padding: 24 }}>
       <h2>Usage</h2>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap', marginTop: 8 }}>
+        <label style={{ fontSize: 12, color: '#555' }}>Range</label>
+        <select value={range} onChange={(e) => setRange(e.target.value)}>
+          <option value="15m">Last 15 mins</option>
+          <option value="1h">Last 1 hour</option>
+          <option value="4h">Last 4 hours</option>
+          <option value="24h">Last 24 hours</option>
+          <option value="7d">Last 7 days</option>
+        </select>
+        <label style={{ fontSize: 12, color: '#555', marginLeft: 12 }}>Category</label>
+        <select value={category} onChange={(e) => setCategory(e.target.value)}>
+          {categoryOptions.map((c, i) => (
+            <option key={i} value={c}>{c || 'All'}</option>
+          ))}
+        </select>
+        <label style={{ fontSize: 12, color: '#555', marginLeft: 12 }}>Model</label>
+        <select value={model} onChange={(e) => setModel(e.target.value)}>
+          {modelOptions.map((m, i) => (
+            <option key={i} value={m}>{m || 'All'}</option>
+          ))}
+        </select>
+      </div>
       <div style={{ marginTop: 16 }}>
         <h3>Tokens per hour (last 24h)</h3>
         {series.length === 0 ? (

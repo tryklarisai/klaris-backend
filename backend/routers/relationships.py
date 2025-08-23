@@ -176,6 +176,7 @@ def create_dataset_review(
         setattr(client, "_db", db)
         setattr(client, "_tenant_id", str(tenant_id))
         setattr(client, "_category", "relationships")
+        setattr(client, "_module", "data_relationships")
     except Exception:
         pass
     options = body.options or CreateDatasetReviewOptions()

@@ -12,6 +12,7 @@ def log_usage_event(
     model: Optional[str],
     operation: str,  # 'chat' | 'embedding'
     category: Optional[str],
+    module: Optional[str] = None,
     input_tokens: Optional[int],
     output_tokens: Optional[int],
     total_tokens: Optional[int],
@@ -30,11 +31,13 @@ def log_usage_event(
                 """
                 INSERT INTO usage_events (
                     tenant_id, provider, model, operation, category,
+                    module,
                     input_tokens, output_tokens, total_tokens,
                     request_id, thread_id, route, status, latency_ms,
                     retry_attempt, cache_hit, metadata
                 ) VALUES (
                     :tenant_id, :provider, :model, :operation, :category,
+                    :module,
                     :input_tokens, :output_tokens, :total_tokens,
                     :request_id, :thread_id, :route, :status, :latency_ms,
                     :retry_attempt, :cache_hit, :metadata
@@ -47,6 +50,7 @@ def log_usage_event(
                 "model": model,
                 "operation": operation,
                 "category": category,
+                "module": module,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "total_tokens": total_tokens,
