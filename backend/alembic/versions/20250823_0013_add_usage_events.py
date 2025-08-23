@@ -43,15 +43,10 @@ def upgrade() -> None:
     )
     op.create_index('ix_usage_events_tenant_time', 'usage_events', ['tenant_id', 'occurred_at'])
     op.create_index('ix_usage_events_tenant_category_time', 'usage_events', ['tenant_id', 'category', 'occurred_at'])
-    op.create_unique_constraint(
-        'uq_usage_events_tenant_request_operation',
-        'usage_events',
-        ['tenant_id', 'request_id', 'operation']
-    )
+    # Intentionally no unique constraint for dedupe; we want every attempt logged
 
 
 def downgrade() -> None:
-    op.drop_constraint('uq_usage_events_tenant_request_operation', 'usage_events', type_='unique')
     op.drop_index('ix_usage_events_tenant_category_time', table_name='usage_events')
     op.drop_index('ix_usage_events_tenant_time', table_name='usage_events')
     op.drop_table('usage_events')

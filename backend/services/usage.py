@@ -39,7 +39,6 @@ def log_usage_event(
                     :request_id, :thread_id, :route, :status, :latency_ms,
                     :retry_attempt, :cache_hit, :metadata
                 )
-                ON CONFLICT ON CONSTRAINT uq_usage_events_tenant_request_operation DO NOTHING
                 """
             ),
             {
