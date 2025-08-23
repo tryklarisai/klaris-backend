@@ -23,6 +23,7 @@ from .tools import make_generic_tools
 from pgvector.sqlalchemy import Vector
 from services.embeddings import get_embeddings_client_for_tenant
 from services.settings import get_tenant_settings, get_setting
+from services.usage import log_usage_event
 
 logger = logging.getLogger("chat_graph")
 
@@ -87,10 +88,18 @@ def _make_llm_for_tenant(db: Session, tenant_id: UUID):
         from langchain_openai import ChatOpenAI
         api_key = str(get_setting(settings, "LLM_API_KEY", ""))
         base_url = str(get_setting(settings, "OPENAI_BASE_URL", "https://api.openai.com/v1"))
-        return ChatOpenAI(model=model, temperature=temperature, streaming=True, api_key=api_key, base_url=base_url)
+        return ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            streaming=True,
+            api_key=api_key,
+            base_url=base_url,
+            model_kwargs={"stream_options": {"include_usage": True}},
+        )
     elif provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
         api_key = str(get_setting(settings, "LLM_API_KEY", ""))
+        # Anthropic does not currently emit token usage on stream; fallback without usage
         return ChatAnthropic(model=model, temperature=temperature, streaming=True, api_key=api_key)
     else:
         from langchain_openai import ChatOpenAI
@@ -610,6 +619,13 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
     if provided_history is not None:
         _THREAD_HISTORIES[session_id] = provided_history.to_langchain()
 
+    # Usage capture (best-effort)
+    import time
+    t0 = time.time()
+    usage_input = 0
+    usage_output = 0
+    usage_total = 0
+
     try:
         # Send an initial event to prompt clients to render immediately
         yield "event: ready\ndata: {}\n\n"
@@ -665,6 +681,24 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
                     outp = dict(outp)
                     outp["rows"] = outp["rows"][:5]
                 yield f"event: tool_end\ndata: {json.dumps(outp)}\n\n"
+            # Usage accumulation if provided by backend
+            elif etype in ("on_llm_end", "on_chat_model_end"):
+                try:
+                    usage = None
+                    if isinstance(data, dict):
+                        usage = data.get("usage") or data.get("generation_info", {}).get("usage")
+                        resp = data.get("response") or {}
+                        if not usage and isinstance(resp, dict):
+                            usage = resp.get("usage")
+                    if isinstance(usage, dict):
+                        pi = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+                        co = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+                        tt = int(usage.get("total_tokens") or (pi + co))
+                        usage_input += pi
+                        usage_output += co
+                        usage_total += tt
+                except Exception:
+                    pass
             # Agent thoughts (optional: use action logs from events)
             elif etype == "on_agent_action" or etype == "on_chain_start":
                 log = data.get("action") or data.get("name") or ""
@@ -681,4 +715,32 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
         logger.exception("astream_events failed: %s", e)
         yield f"event: error\ndata: {json.dumps(str(e))}\n\n"
     finally:
+        # Log usage best-effort
+        try:
+            settings = get_tenant_settings(db, tenant_id)
+            provider = str(get_setting(settings, "LLM_PROVIDER", "openai")).lower()
+            model = str(get_setting(settings, "LLM_MODEL", "gpt-4o"))
+            route_str = None
+            if route_meta:
+                try:
+                    route_str = json.dumps(route_meta)
+                except Exception:
+                    route_str = str(route_meta)
+            log_usage_event(
+                db,
+                tenant_id=str(tenant_id),
+                provider=provider,
+                model=model,
+                operation="chat",
+                category="chat",
+                input_tokens=int(usage_input) if usage_input else None,
+                output_tokens=int(usage_output) if usage_output else None,
+                total_tokens=int(usage_total) if usage_total else None,
+                request_id=None,
+                thread_id=str(thread_id) if isinstance(thread_id, str) else None,
+                route=route_str,
+                latency_ms=int((time.time() - t0) * 1000),
+            )
+        except Exception:
+            pass
         yield "event: done\ndata: {}\n\n"

@@ -2,7 +2,7 @@
 add usage_events table for LLM/embeddings usage tracking
 
 Revision ID: 20250823_0013_add_usage_events
-Revises: 20250822_0012_drop_business_context
+Revises: 20250822_0015_glossary_only_prune
 Create Date: 2025-08-23
 """
 
@@ -13,7 +13,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = '20250823_0013_add_usage_events'
-down_revision = '20250822_0012_drop_business_context'
+down_revision = '20250822_0015_glossary_only_prune'
 branch_labels = None
 depends_on = None
 

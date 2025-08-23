@@ -16,6 +16,8 @@ import jwt
 import json
 
 from db import get_db
+from services.settings import get_tenant_settings, get_setting
+from services.usage import log_usage_event
 from models.tenant import ChatThread
 from agents.chat_graph import run_chat_agent_stream, create_thread, list_threads, delete_thread
 
@@ -74,6 +76,7 @@ async def chat_endpoint(
     db: Session = Depends(get_db),
     credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
 ):
+    import time
     tenant_id = _get_tenant_from_token(credentials)
     # Best-effort: ensure thread exists in DB and set auto-title if missing
     if body.thread_id:
@@ -99,6 +102,7 @@ async def chat_endpoint(
             except Exception:
                 pass
     gen = run_chat_agent_stream(db, tenant_id, body.message, thread_id=body.thread_id)
+    t0 = time.time()
     answer: str = ""
     route: Optional[Dict[str, Any]] = None
     data_preview: Optional[Dict[str, Any]] = None
@@ -131,6 +135,32 @@ async def chat_endpoint(
             await gen.aclose()
         except Exception:
             pass
+
+    # Best-effort usage logging for chat operation (tokens not available via LangChain stream)
+    try:
+        settings = get_tenant_settings(db, tenant_id)
+        provider = str(get_setting(settings, "LLM_PROVIDER", "openai")).lower()
+        model = str(get_setting(settings, "LLM_MODEL", "gpt-4o"))
+        route_str = None
+        if isinstance(route, dict):
+            route_str = json.dumps({k: route.get(k) for k in ("tool", "connector_id", "connector_type") if k in route})
+        log_usage_event(
+            db,
+            tenant_id=str(tenant_id),
+            provider=provider,
+            model=model,
+            operation="chat",
+            category="chat",
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            request_id=None,
+            thread_id=body.thread_id,
+            route=route_str,
+            latency_ms=int((time.time() - t0) * 1000),
+        )
+    except Exception:
+        pass
 
     route_model = RouteMeta(**route) if isinstance(route, dict) else None
     dp_model = DataPreview(**data_preview) if isinstance(data_preview, dict) and data_preview.get("columns") is not None else None
