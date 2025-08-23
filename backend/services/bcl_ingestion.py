@@ -8,7 +8,7 @@ import os
 from sqlalchemy.orm import Session
 
 from models.bcl import BclDocument, BclChunk
-from services.embeddings import get_embeddings_client_for_tenant
+from services.embeddings import embed_and_log
 
 
 def _normalize_kind(mime_type: str | None, filename: str | None) -> str:
@@ -198,8 +198,7 @@ def ingest_document(
         return {"document_id": str(doc.document_id), "chunks": 0, "status": doc.status}
 
     # Embed and insert
-    embed_client = get_embeddings_client_for_tenant(db, tenant_id)
-    vectors = embed_client.embed(chunks)
+    vectors = embed_and_log(db, tenant_id, chunks, category="bcl_ingestion")
     now = datetime.utcnow()
     created = 0
     for i, chunk_text in enumerate(chunks):

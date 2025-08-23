@@ -58,6 +58,12 @@ def propose_mappings_for_all_terms(db: Session, tenant_id: str) -> Dict[str, Any
 
     # Build prompt (connector-agnostic) and call LLM
     provider, model, client = get_llm_client_for_tenant(db, tenant_id)
+    try:
+        setattr(client, "_db", db)
+        setattr(client, "_tenant_id", tenant_id)
+        setattr(client, "_category", "bcl_proposer")
+    except Exception:
+        pass
     import json
     system = (
         "You propose business-term mappings to a canonical data model."

@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { buildApiUrl } from '../config';
 
 function useAuthHeaders() {
   return React.useMemo(() => {
-    const token = localStorage.getItem('token') || '';
-    const tenantJson = localStorage.getItem('tenant');
+    const token = localStorage.getItem('klaris_jwt') || '';
+    const tenantJson = localStorage.getItem('klaris_tenant');
     const tenant = tenantJson ? JSON.parse(tenantJson) : null;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -32,10 +33,10 @@ export default function UsagePage() {
       const to = now.toISOString();
       qs.set('from', from);
       qs.set('to', to);
-      const sres = await fetch(`/api/v1/usage/${tenant.tenant_id}/series?` + qs.toString(), { headers });
+      const sres = await fetch(buildApiUrl(`/api/v1/usage/${tenant.tenant_id}/series?` + qs.toString()), { headers } as RequestInit);
       const sjson = await sres.json();
       setSeries(sjson.series || []);
-      const sumres = await fetch(`/api/v1/usage/${tenant.tenant_id}/summary?` + qs.toString(), { headers });
+      const sumres = await fetch(buildApiUrl(`/api/v1/usage/${tenant.tenant_id}/summary?` + qs.toString()), { headers } as RequestInit);
       const sumjson = await sumres.json();
       setSummary(sumjson || null);
     }

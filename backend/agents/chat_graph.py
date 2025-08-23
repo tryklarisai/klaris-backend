@@ -436,8 +436,8 @@ def _glossary_context_for_query(db: Session, tenant_id: UUID, query_text: str, t
     # 2) Vector semantic match
     if len(term_rows) < int(top_k_terms):
         try:
-            client = get_embeddings_client_for_tenant(db, str(tenant_id))
-            [qvec] = client.embed([query_text])
+            from services.embeddings import embed_and_log
+            [qvec] = embed_and_log(db, str(tenant_id), [query_text], category="chat")
             q_vec = text(
                 """
                 SELECT t.term_id::text, t.term, t.normalized_term, t.description,

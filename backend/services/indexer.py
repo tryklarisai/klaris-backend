@@ -113,9 +113,8 @@ def _compute_relationship_card(version: str, generated_at: str, rel: dict) -> Tu
 
 
 def _embed_texts(db: Session, tenant_id: str, texts: List[str]) -> List[List[float]]:
-    from services.embeddings import get_embeddings_client_for_tenant
-    client = get_embeddings_client_for_tenant(db, tenant_id)
-    return client.embed(texts)
+    from services.embeddings import embed_and_log
+    return embed_and_log(db, tenant_id, texts, category="indexer_cards")
 
 
 def upsert_cards(db: Session, tenant_id: str, canonical: Dict[str, Any]) -> Dict[str, Any]:

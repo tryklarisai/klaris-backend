@@ -171,6 +171,13 @@ def create_dataset_review(
     logger.info("[relationships] latest_schemas=%d", len(latest_schemas))
 
     provider, model, client = get_llm_client_for_tenant(db, str(tenant_id))
+    # Inject usage logging context
+    try:
+        setattr(client, "_db", db)
+        setattr(client, "_tenant_id", str(tenant_id))
+        setattr(client, "_category", "relationships")
+    except Exception:
+        pass
     options = body.options or CreateDatasetReviewOptions()
     rel_conf_threshold = float(options.confidence_threshold or 0.6)
 

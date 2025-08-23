@@ -144,8 +144,7 @@ async def import_glossary(
 
     # Optional embedding of terms (term + description)
     try:
-        from services.embeddings import get_embeddings_client_for_tenant
-        client = get_embeddings_client_for_tenant(db, auth.tenant_id)
+        from services.embeddings import embed_and_log
         # Fetch all updated/new terms for this tenant (simple approach)
         rows = db.query(BclTerm).filter(BclTerm.tenant_id == auth.tenant_id).all()
         texts: List[str] = []
@@ -155,7 +154,7 @@ async def import_glossary(
             texts.append(txt)
             ids.append(str(t.term_id))
         if texts:
-            vecs = client.embed(texts)
+            vecs = embed_and_log(db, auth.tenant_id, texts, category="bcl_glossary")
             # Bulk update – best-effort per row
             for i, v in enumerate(vecs):
                 db.execute(text("UPDATE bcl_terms SET embedding = :emb WHERE term_id::text = :id"), {"emb": v, "id": ids[i]})
@@ -193,9 +192,8 @@ def search_terms(q: str = "", top_k: int = 10, db: Session = Depends(get_db), au
         return {"terms": [{"term_id": str(t.term_id), "term": t.term, "description": t.description} for t in rows]}
     # Try vector
     try:
-        from services.embeddings import get_embeddings_client_for_tenant
-        client = get_embeddings_client_for_tenant(db, auth.tenant_id)
-        [qvec] = client.embed([q])
+        from services.embeddings import embed_and_log
+        [qvec] = embed_and_log(db, auth.tenant_id, [q], category="bcl_glossary")
         s = text(
             """
             SELECT term_id::text, term, description, 1 - (embedding <=> :qvec) AS score
