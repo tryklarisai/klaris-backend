@@ -10,46 +10,103 @@ from typing import Any, Dict, List, Optional
 import os, json, logging, re
 from uuid import UUID
 from sqlalchemy.orm import Session
+from sqlalchemy import text, bindparam
+from datetime import datetime
 
 from models.connector import Connector
 from models.schema_review import GlobalCanonicalSchema
 from models.schema import Schema
-from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.tools import tool
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain.agents import AgentExecutor, create_openai_tools_agent
-try:
-    # Reuse validated, read-only runner from Postgres tool
-    from .tools.postgres_tool import make_postgres_tool_runner  # type: ignore
-except Exception as e:  # pragma: no cover
-    logging.getLogger("chat_graph").warning("Failed to import Postgres tool runner: %s", e)
-    make_postgres_tool_runner = None  # type: ignore
-try:
-    # Sheets read runner (expects JSON spec)
-    from .tools.gsheets_tool import make_gsheets_tool_runner  # type: ignore
-except Exception as e:  # pragma: no cover
-    logging.getLogger("chat_graph").warning("Failed to import GSheets tool runner: %s", e)
-    make_gsheets_tool_runner = None  # type: ignore
+from langchain.callbacks.base import BaseCallbackHandler
+from .tools import make_generic_tools
+from pgvector.sqlalchemy import Vector
+from services.embeddings import get_embeddings_client_for_tenant
+from services.settings import get_tenant_settings, get_setting
+from services.usage import log_usage_event
 
 logger = logging.getLogger("chat_graph")
 
-def _make_llm():
-    provider = os.getenv("LLM_PROVIDER", "openai").lower()
-    model = os.getenv("LLM_MODEL", "gpt-4o")
-    temperature = float(os.getenv("LLM_TEMPERATURE", "0"))
+# In-memory store for chat histories keyed by session (tenant + thread)
+_THREAD_HISTORIES: dict[str, InMemoryChatMessageHistory] = {}
+# Per-session max turns configured from tenant settings
+_SESSION_MAX_TURNS: dict[str, int] = {}
+
+class MessageHistory:
+    """Lightweight message history used in tests/back-compat.
+    Stores (role, content) tuples and can convert to LangChain's InMemoryChatMessageHistory.
+    """
+    def __init__(self) -> None:
+        self.messages: List[tuple[str, str]] = []
+
+    def add_message(self, role: str, content: str) -> None:
+        self.messages.append((str(role), str(content)))
+
+    def to_langchain(self) -> InMemoryChatMessageHistory:
+        h = InMemoryChatMessageHistory()
+        try:
+            for role, content in self.messages:
+                r = (role or "").lower()
+                if r in ("user", "human"):
+                    h.add_user_message(content)
+                elif r in ("assistant", "ai"):
+                    h.add_ai_message(content)
+                else:
+                    # default to user message for unknown roles
+                    h.add_user_message(content)
+        except Exception:
+            pass
+        return h
+
+def _session_key(tenant_id: UUID, thread_id: Optional[str]) -> str:
+    return f"{tenant_id}:{thread_id or 'default'}"
+
+def create_thread(tenant_id: UUID) -> str:
+    import uuid as _uuid
+    tid = _uuid.uuid4().hex
+    _THREAD_HISTORIES[_session_key(tenant_id, tid)] = InMemoryChatMessageHistory()
+    return tid
+
+def list_threads(tenant_id: UUID) -> list[str]:
+    prefix = f"{tenant_id}:"
+    return [k.split(":", 1)[1] for k in _THREAD_HISTORIES.keys() if k.startswith(prefix)]
+
+def delete_thread(tenant_id: UUID, thread_id: str) -> bool:
+    key = _session_key(tenant_id, thread_id)
+    return _THREAD_HISTORIES.pop(key, None) is not None
+
+def _make_llm_for_tenant(db: Session, tenant_id: UUID):
+    settings = get_tenant_settings(db, tenant_id)
+    provider = str(get_setting(settings, "LLM_PROVIDER", "openai")).lower()
+    model = str(get_setting(settings, "LLM_MODEL", "gpt-4o"))
+    temperature = float(get_setting(settings, "LLM_TEMPERATURE", 0.0))
     try:
         logger.info("llm_init provider=%s model=%s temperature=%s", provider, model, temperature)
     except Exception:
         pass
     if provider == "openai":
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=model, temperature=temperature, streaming=True, api_key=os.getenv("LLM_API_KEY"))
+        api_key = str(get_setting(settings, "LLM_API_KEY", ""))
+        base_url = str(get_setting(settings, "OPENAI_BASE_URL", "https://api.openai.com/v1"))
+        return ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            streaming=True,
+            api_key=api_key,
+            base_url=base_url,
+            stream_usage=True,
+        )
     elif provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
-        return ChatAnthropic(model=model, temperature=temperature, streaming=True, api_key=os.getenv("LLM_API_KEY"))
+        api_key = str(get_setting(settings, "LLM_API_KEY", ""))
+        # Anthropic does not currently emit token usage on stream; fallback without usage
+        return ChatAnthropic(model=model, temperature=temperature, streaming=True, api_key=api_key)
     else:
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model=model, temperature=temperature, streaming=True, api_key=os.getenv("LLM_API_KEY"))
+        api_key = str(get_setting(settings, "LLM_API_KEY", ""))
+        return ChatOpenAI(model=model, temperature=temperature, streaming=True, api_key=api_key)
 
 def _build_connectors_summary(connectors: List[Connector]) -> List[Dict[str, Any]]:
     return [{"connector_id": str(c.connector_id), "connector_type": c.type} for c in connectors]
@@ -145,113 +202,6 @@ def _build_connector_capabilities(connectors: List[Connector], connector_schemas
         caps[str(c.connector_id)] = base
     return caps
 
-
-def _adapter_postgres_list_schema(connector: Connector, schema_summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    return schema_summary or {"tables": []}
-
-def _adapter_postgres_read(connector: Connector, args: Dict[str, Any]) -> Dict[str, Any]:
-    runner = make_postgres_tool_runner(connector.config)  # type: ignore[arg-type]
-    # `args` looks like {"connector_id": "...", "spec": <dict|str>}
-    outer_spec = args if isinstance(args, dict) else {}
-    spec = outer_spec.get("spec")
-
-    # Mode 1: explicit SQL (string or dict with sql/query)
-    if isinstance(spec, str):
-        sql_query = spec
-    elif isinstance(spec, dict):
-        if spec.get("sql") or spec.get("query"):
-            sql_query = spec.get("sql") or spec.get("query")
-        else:
-            # Mode 2: relation — accept either flat or nested under "relation"
-            relation = spec.get("relation") if isinstance(spec.get("relation"), dict) else spec
-            name = relation.get("name") if isinstance(relation, dict) else None
-            columns = relation.get("columns") if isinstance(relation, dict) else None
-            filters = relation.get("filters") if isinstance(relation, dict) else None
-            limit = relation.get("limit") if isinstance(relation, dict) else None
-            if not isinstance(name, str) or not isinstance(columns, list):
-                return {"error": "postgres.read requires spec.sql or spec.relation{name,columns}"}
-
-            def _quote_ident(s: str) -> str:
-                s = str(s)
-                return '"' + s.replace('"', '""') + '"'
-
-            sel_cols = ", ".join(_quote_ident(c) for c in columns)
-            where_parts: List[str] = []
-            for f in (filters or []):
-                col = f.get("column")
-                op = (f.get("op") or "=").lower()
-                val = f.get("value")
-                if col is None:
-                    continue
-                if op == "in" and isinstance(val, list):
-                    def _lit(v):
-                        if isinstance(v, (int, float)):
-                            return str(v)
-                        return "'" + str(v).replace("'", "''") + "'"
-                    where_parts.append(f"{_quote_ident(col)} IN (" + ", ".join(_lit(v) for v in val) + ")")
-                else:
-                    if isinstance(val, (int, float)):
-                        lit = str(val)
-                    else:
-                        lit = "'" + str(val).replace("'", "''") + "'"
-                    if op not in ("=", "!=", ">", ">=", "<", "<="):
-                        op = "="
-                    where_parts.append(f"{_quote_ident(col)} {op} {lit}")
-            where_sql = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
-            lim_sql = f" LIMIT {int(limit)}" if isinstance(limit, int) else " LIMIT 200"
-            sql_query = f"SELECT {sel_cols} FROM {name}{where_sql}{lim_sql}"
-    else:
-        return {"error": "postgres.read requires spec (string SQL or relation dict)"}
-
-    parsed_r = json.loads(runner(sql_query))
-    return parsed_r
-
-def _adapter_gsheets_list_schema(connector: Connector, schema_summary: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    return schema_summary or {"tables": []}
-
-def _adapter_gsheets_read(connector: Connector, args: Dict[str, Any]) -> Dict[str, Any]:
-    runner = make_gsheets_tool_runner(connector.config)  # type: ignore[arg-type]
-    spec = args.get("spec") if isinstance(args, dict) else None
-    if not isinstance(spec, (dict, str)):
-        return {"error": "gsheets.read requires args.spec"}
-
-    # If spec is dict and nested under "sheet", unwrap it
-    if isinstance(spec, dict) and "sheet" in spec and isinstance(spec["sheet"], dict):
-        spec = dict(spec["sheet"])
-
-    # If dict, allow file_id+sheet OR direct entity_id
-    if isinstance(spec, dict) and not spec.get("entity_id"):
-        if spec.get("file_id") and spec.get("sheet"):
-            spec = dict(spec)
-            spec["entity_id"] = f"{spec.get('file_id')}:{spec.get('sheet')}"
-        else:
-            return {"error": "missing entity_id or file_id+sheet"}
-
-    parsed = json.loads(runner(spec if isinstance(spec, str) else json.dumps(spec)))
-    return parsed
-
-
-# Central adapter registry (single place for connector-specific logic)
-ADAPTERS: Dict[str, Dict[str, Any]] = {
-    "postgres": {"list_schema": _adapter_postgres_list_schema, "read": _adapter_postgres_read},
-    "google_drive": {"list_schema": _adapter_gsheets_list_schema, "read": _adapter_gsheets_read},
-}
-
-def _load_canonical_summary(db: Session, tenant_id: UUID) -> Dict[str, Any]:
-    latest = (
-        db.query(GlobalCanonicalSchema)
-        .filter(GlobalCanonicalSchema.tenant_id == tenant_id)
-        .order_by(GlobalCanonicalSchema.version.desc())
-        .first()
-    )
-    if not latest:
-        return {}
-    cg = latest.canonical_graph or {}
-    ents = cg.get("unified_entities", [])[:20]  # keep prompt small
-    for e in ents:
-        if isinstance(e.get("fields"), list):
-            e["fields"] = e["fields"][:20]
-    return {"unified_entities": ents}
 
 def _summarize_connector_raw_schema(raw: Any) -> Dict[str, Any]:
     """Produce a compact table/column summary from a connector's raw schema JSON.
@@ -431,236 +381,327 @@ def _attach_field_sources(canonical_summary: Dict[str, Any], connector_schemas: 
             if sources:
                 fobj["sources"] = sources
 
+def _load_canonical_summary(db: Session, tenant_id: UUID) -> Dict[str, Any]:
+    """Fetch latest global canonical schema graph for the tenant.
+    Returns a dict and guarantees `unified_entities` exists (empty list fallback).
+    """
+    try:
+        latest = (
+            db.query(GlobalCanonicalSchema)
+            .filter(GlobalCanonicalSchema.tenant_id == tenant_id)
+            .order_by(GlobalCanonicalSchema.version.desc())
+            .first()
+        )
+        if latest:
+            graph = latest.canonical_graph
+            if isinstance(graph, dict):
+                # Ensure expected key exists for downstream enrichment
+                if not isinstance(graph.get("unified_entities"), list):
+                    graph = dict(graph)
+                    graph["unified_entities"] = []
+                return graph
+    except Exception:
+        # Swallow and fallback to minimal summary to keep planner operational
+        pass
+    return {"unified_entities": []}
+
+
+def _normalize_term_value(value: str) -> str:
+    try:
+        return " ".join((value or "").strip().lower().split())
+    except Exception:
+        return value or ""
+
+
+def _glossary_context_for_query(db: Session, tenant_id: UUID, query_text: str, top_k_terms: int = 5) -> Dict[str, Any]:
+    """Glossary-only matching for chat context.
+    Order: exact normalized match → vector (if available) → FTS fallback.
+    Returns { terms: [{term, normalized_term, description, score}] }.
+    """
+    term_rows: List[Dict[str, Any]] = []
+
+    # 1) Exact normalized equality
+    try:
+        norm_q = _normalize_term_value(query_text)
+        if norm_q:
+            q_eq = text(
+                """
+                SELECT t.term_id::text, t.term, t.normalized_term, t.description,
+                       1.0 AS score
+                FROM bcl_terms t
+                WHERE t.tenant_id::text = :tenant
+                  AND t.normalized_term = :norm_q
+                LIMIT :k
+                """
+            )
+            for r in db.execute(q_eq, {"tenant": str(tenant_id), "norm_q": norm_q, "k": int(top_k_terms)}):
+                term_rows.append(dict(r._mapping))
+        if term_rows:
+            logger.info("BCL: exact-normalized matched %d terms", len(term_rows))
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    # 2) Vector semantic match
+    if len(term_rows) < int(top_k_terms):
+        try:
+            from services.embeddings import embed_and_log
+            [qvec] = embed_and_log(db, str(tenant_id), [query_text], category="chat", module="chat_module")
+            q_vec = text(
+                """
+                SELECT t.term_id::text, t.term, t.normalized_term, t.description,
+                       1 - (t.embedding <=> :qvec) AS score
+                FROM bcl_terms t
+                WHERE t.tenant_id::text = :tenant AND t.embedding IS NOT NULL
+                ORDER BY t.embedding <=> :qvec
+                LIMIT :k
+                """
+            ).bindparams(bindparam("qvec", type_=Vector()))
+            for r in db.execute(q_vec, {"qvec": qvec, "tenant": str(tenant_id), "k": int(top_k_terms - len(term_rows))}):
+                term_rows.append(dict(r._mapping))
+            logger.info("BCL: vector matched total %d terms", len(term_rows))
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    # 3) FTS fallback
+    if len(term_rows) < int(top_k_terms) and isinstance(query_text, str) and query_text.strip():
+        q_fts = text(
+            """
+            SELECT t.term_id::text, t.term, t.normalized_term, t.description,
+                   0.5 AS score
+            FROM bcl_terms t
+            WHERE t.tenant_id::text = :tenant
+              AND to_tsvector('english', coalesce(t.term,'') || ' ' || coalesce(t.description,'')) @@ plainto_tsquery('english', :q)
+            LIMIT :k
+            """
+        )
+        try:
+            for r in db.execute(q_fts, {"tenant": str(tenant_id), "q": query_text, "k": int(top_k_terms - len(term_rows))}):
+                term_rows.append(dict(r._mapping))
+            logger.info("BCL: FTS matched total %d terms", len(term_rows))
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    # Build response
+    terms: List[Dict[str, Any]] = []
+    for tr in term_rows:
+        terms.append({
+            "term": tr.get("term"),
+            "normalized_term": tr.get("normalized_term"),
+            "description": tr.get("description"),
+            "score": float(tr.get("score") or 0.0),
+        })
+    return {"terms": terms}
+
+
+def _extract_chart_intent(message: str) -> Dict[str, Any]:
+    """Detect if user asked for a chart and infer desired type if hinted.
+    Returns { want_chart: bool, type_hint: Optional[str] } where type_hint in {bar,line,area,scatter}.
+    """
+    try:
+        m = (message or "").lower()
+        want = any(k in m for k in ("chart", "plot", "graph", "visual", "visualize", "visualisation", "visualization"))
+        type_hint = None
+        for k in ("bar", "line", "area", "scatter"):
+            if k in m:
+                type_hint = k
+                break
+        return {"want_chart": want or (type_hint is not None), "type_hint": type_hint}
+    except Exception:
+        return {"want_chart": False, "type_hint": None}
+
+
+def _is_numeric(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, str):
+        try:
+            float(value)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _is_temporal(value: Any) -> bool:
+    if isinstance(value, (int, float)):
+        # Treat pure numbers as non-temporal (skip epoch heuristics for simplicity)
+        return False
+    if isinstance(value, str):
+        s = value.strip()
+        # Quick ISO-like patterns
+        if re.match(r"^\d{4}-\d{2}-\d{2}", s):
+            return True
+        try:
+            # Fallback to ISO parse
+            datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _build_charts_from_preview(message: str, preview: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Build minimal Vega-Lite chart specs from data preview based on simple heuristics.
+    Returns a list of { title?, type: 'vega-lite', spec }.
+    """
+    if not isinstance(preview, dict):
+        return []
+    columns = preview.get("columns") or []
+    rows = preview.get("rows") or []
+    if not isinstance(columns, list) or not isinstance(rows, list) or not columns or not rows:
+        return []
+
+    intent = _extract_chart_intent(message)
+    if not intent.get("want_chart"):
+        return []
+
+    # Infer column types by sampling
+    sample = rows[:50]
+    num_cols: List[str] = []
+    temporal_cols: List[str] = []
+    cat_cols: List[str] = []
+    for idx, col in enumerate(columns):
+        col_values = [r[idx] for r in sample if isinstance(r, list) and len(r) > idx]
+        num_count = sum(1 for v in col_values if _is_numeric(v))
+        temp_count = sum(1 for v in col_values if _is_temporal(v))
+        if num_count >= max(1, len(col_values) // 2):
+            num_cols.append(str(col))
+        elif temp_count >= max(1, len(col_values) // 2) or str(col).lower() in ("date", "day", "month", "year", "timestamp", "created_at", "updated_at"):
+            temporal_cols.append(str(col))
+        else:
+            cat_cols.append(str(col))
+
+    # Build records for values
+    values: List[Dict[str, Any]] = []
+    for r in sample:
+        if not isinstance(r, list):
+            continue
+        obj: Dict[str, Any] = {}
+        for i, c in enumerate(columns):
+            if i < len(r):
+                obj[str(c)] = r[i]
+        if obj:
+            values.append(obj)
+
+    charts: List[Dict[str, Any]] = []
+    type_hint = intent.get("type_hint")
+
+    def add_chart(spec: Dict[str, Any], title: Optional[str] = None):
+        charts.append({"title": title, "type": "vega-lite", "spec": spec})
+
+    # Prefer temporal line/area when available
+    if temporal_cols and num_cols:
+        x = temporal_cols[0]
+        nums = num_cols[:4]  # cap series
+        if len(nums) > 1:
+            # Fold to long for multi-series
+            spec = {
+                "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+                "data": {"values": values},
+                "transform": [{"fold": nums, "as": ["series", "value"]}],
+                "mark": {"type": ("area" if type_hint == "area" else "line"), "tooltip": True},
+                "encoding": {
+                    "x": {"field": x, "type": "temporal"},
+                    "y": {"field": "value", "type": "quantitative"},
+                    "color": {"field": "series", "type": "nominal"}
+                }
+            }
+        else:
+            spec = {
+                "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+                "data": {"values": values},
+                "mark": {"type": ("area" if type_hint == "area" else "line"), "tooltip": True},
+                "encoding": {
+                    "x": {"field": x, "type": "temporal"},
+                    "y": {"field": nums[0], "type": "quantitative"}
+                }
+            }
+        add_chart(spec, title=None)
+        return charts
+
+    # Scatter if user asked and we have 2 numeric columns
+    if type_hint == "scatter" and len(num_cols) >= 2:
+        x, y = num_cols[0], num_cols[1]
+        spec = {
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "data": {"values": values},
+            "mark": {"type": "point", "tooltip": True},
+            "encoding": {
+                "x": {"field": x, "type": "quantitative"},
+                "y": {"field": y, "type": "quantitative"}
+            }
+        }
+        add_chart(spec, title=None)
+        return charts
+
+    # Bar for categorical + numeric
+    if cat_cols and num_cols:
+        x = cat_cols[0]
+        y = num_cols[0]
+        spec = {
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "data": {"values": values},
+            "mark": {"type": "bar", "tooltip": True} if (type_hint in (None, "bar")) else {"type": "bar", "tooltip": True},
+            "encoding": {
+                "x": {"field": x, "type": "nominal", "sort": "-y"},
+                "y": {"field": y, "type": "quantitative"}
+            }
+        }
+        add_chart(spec, title=None)
+        return charts
+
+    # Fallback: if at least 2 numeric columns, scatter
+    if len(num_cols) >= 2:
+        x, y = num_cols[0], num_cols[1]
+        spec = {
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "data": {"values": values},
+            "mark": {"type": "point", "tooltip": True},
+            "encoding": {
+                "x": {"field": x, "type": "quantitative"},
+                "y": {"field": y, "type": "quantitative"}
+            }
+        }
+        add_chart(spec, title=None)
+        return charts
+
+    return []
+
 def run_chat_agent(db: Session, tenant_id: UUID, message: str) -> Dict[str, Any]:
-    connectors: List[Connector] = db.query(Connector).filter(Connector.tenant_id == tenant_id).all()
-    canonical_summary = _load_canonical_summary(db, tenant_id)
-    conn_summaries = _build_connectors_summary(connectors)
-    connector_schemas = _load_connector_schemas(db, tenant_id, connectors)
-
-    agent_instructions = (
-    "You are an analytics assistant. Use the available tools to plan and gather data.\n"
-    "- Use ONLY tables/columns derivable from the provided schema context (canonical_summary, connector_schemas). Do NOT guess.\n"
-    "- For tool calls, consult `connector_capabilities` to see what tools exist and the required spec shapes (schemas & examples are provided there).\n"
-    "- Prefer field.sources in canonical_summary to pick connector/entity.\n"
-    "- Keep reads minimal and include LIMITs when applicable.\n"
-    "- Before calling any tools, briefly restate the user's goal and outline a short plan.\n"
-    "- As you execute tool calls, narrate progress succinctly.\n"
-    "- Finish with a concise final answer in natural language (no JSON)."
+    raise RuntimeError(
+        "run_chat_agent() has been removed. Use run_chat_agent_stream() and aggregate its events for a final response."
     )
 
-
-    # Enrich canonical schema fields with candidate data sources for the planner
-    _attach_field_sources(canonical_summary, connector_schemas, connectors)
-    connector_capabilities = _build_connector_capabilities(connectors, connector_schemas)
-
-    # Build tools that delegate to the adapter registry, allowing the LLM to call them directly
-    previews: List[Dict[str, Any]] = []
-    data_preview: Optional[Dict[str, Any]] = None
-    route_meta: Optional[Dict[str, str]] = None
-
-    # Streaming agent instructions (same content as non-streaming path)
-    agent_instructions = (
-    "You are an analytics assistant. Use the available tools to plan and gather data.\n"
-    "- Use ONLY tables/columns derivable from the provided schema context (canonical_summary, connector_schemas). Do NOT guess.\n"
-    "- For tool calls, consult `connector_capabilities` to see what tools exist and the required spec shapes (schemas & examples are provided there).\n"
-    "- Prefer field.sources in canonical_summary to pick connector/entity.\n"
-    "- Keep reads minimal and include LIMITs when applicable.\n"
-    "- Before calling any tools, briefly restate the user's goal and outline a short plan.\n"
-    "- As you execute tool calls, narrate progress succinctly.\n"
-    "- Finish with a concise final answer in natural language (no JSON)."
-    )
-
-
+def _history_for_session(session_id: str) -> InMemoryChatMessageHistory:
+    """Get or create an in-memory history for a session, trimming to a window size.
     
-
-    @tool
-    def list_schema(connector_id: str) -> Dict[str, Any]:
-        """Return a compact schema summary for a connector to help decide what to read."""
-        conn_for_plan = None
-        for c in connectors:
-            if str(c.connector_id) == str(connector_id):
-                conn_for_plan = c
-                break
-        if not conn_for_plan:
-            try:
-                logger.info("tool_call list_schema error connector_not_found connector_id=%s", str(connector_id))
-            except Exception:
-                pass
-            return {"error": "connector not found"}
-        ctype = _normalize_connector_type(conn_for_plan.type)
-        adapter = ADAPTERS.get(ctype)
-        if not adapter or not adapter.get("list_schema"):
-            try:
-                logger.info("tool_call list_schema error unsupported_type connector_id=%s type=%s", str(connector_id), ctype)
-            except Exception:
-                pass
-            return {"error": f"unsupported connector type: {ctype}"}
-        try:
-            logger.info("tool_call list_schema start connector_id=%s type=%s", str(connector_id), ctype)
-        except Exception:
-            pass
-        out = adapter["list_schema"](conn_for_plan, connector_schemas.get(str(connector_id)))
-        try:
-            tables = (out or {}).get("tables") if isinstance(out, dict) else None
-            tcount = len(tables) if isinstance(tables, list) else None
-            logger.info("tool_call list_schema end connector_id=%s type=%s tables=%s", str(connector_id), ctype, tcount)
-        except Exception:
-            pass
-        return out
-
-    @tool
-    def read(connector_id: str, spec: Optional[dict | str] = None) -> Dict[str, Any]:
-        """Read data from a connector using a connector-specific spec. Include a LIMIT when applicable."""
-        nonlocal data_preview, route_meta
-        conn_for_plan = None
-        for c in connectors:
-            if str(c.connector_id) == str(connector_id):
-                conn_for_plan = c
-                break
-        if not conn_for_plan or not isinstance(getattr(conn_for_plan, "config", None), dict):
-            try:
-                logger.info("tool_call read error connector_not_found connector_id=%s", str(connector_id))
-            except Exception:
-                pass
-            return {"error": "connector not found"}
-        ctype = _normalize_connector_type(conn_for_plan.type)
-        adapter = ADAPTERS.get(ctype)
-        if not adapter or not adapter.get("read"):
-            try:
-                logger.info("tool_call read error unsupported_type connector_id=%s type=%s", str(connector_id), ctype)
-            except Exception:
-                pass
-            return {"error": f"unsupported connector type: {ctype}"}
-        # For Google Sheets, allow resolving entity_id from entity/name using current schema
-        if ctype == "google_drive" and isinstance(spec, dict):
-            try:
-                es = spec.get("entity_id")
-                if not es:
-                    # Accept alias keys
-                    entity_name = spec.get("entity") or spec.get("name") or spec.get("table")
-                    if isinstance(entity_name, str):
-                        schema_summary = connector_schemas.get(str(connector_id)) or {}
-                        tables = schema_summary.get("tables") or []
-                        # match full name or just the sheet title after ' / '
-                        norm_target = _normalize_identifier(entity_name)
-                        found_eid = None
-                        for t in tables:
-                            tname = t.get("name")
-                            tid = t.get("entity_id")
-                            if not isinstance(tname, str):
-                                continue
-                            # exact or normalized match
-                            tparts = tname.split("/", 1)
-                            sheet_part = tparts[-1].strip() if tparts else tname
-                            if entity_name.strip() == tname or entity_name.strip() == sheet_part or _normalize_identifier(tname) == norm_target or _normalize_identifier(sheet_part) == norm_target:
-                                if isinstance(tid, str):
-                                    found_eid = tid
-                                    break
-                        if found_eid:
-                            spec = dict(spec)
-                            spec["entity_id"] = found_eid
-            except Exception:
-                pass
-
-        # Log start with a safely truncated spec
-        try:
-            spec_str = spec if isinstance(spec, str) else json.dumps(spec) if spec is not None else "null"
-            if isinstance(spec_str, str) and len(spec_str) > 500:
-                spec_str = spec_str[:500] + "..."
-            logger.info("tool_call read start connector_id=%s type=%s spec=%s", str(connector_id), ctype, spec_str)
-        except Exception:
-            pass
-        parsed_r = adapter["read"](conn_for_plan, {"connector_id": str(connector_id), "spec": spec})
-        if isinstance(parsed_r, dict):
-            parsed_r.setdefault("connector_id", str(connector_id))
-            parsed_r.setdefault("connector_type", ctype)
-            cols, rows = parsed_r.get("columns"), parsed_r.get("rows")
-            if isinstance(cols, list) and isinstance(rows, list):
-                if data_preview is None:
-                    data_preview = {"columns": cols, "rows": rows[:50]}
-                    route_meta = {"tool": "read", "connector_id": str(connector_id), "connector_type": ctype}
-                previews.append({"connector_id": str(connector_id), "connector_type": ctype, "columns": cols, "rows": rows[:50]})
-        try:
-            if isinstance(parsed_r, dict):
-                err = parsed_r.get("error")
-                rcount = len(parsed_r.get("rows")) if isinstance(parsed_r.get("rows"), list) else None
-                ccount = len(parsed_r.get("columns")) if isinstance(parsed_r.get("columns"), list) else None
-                sql_str = parsed_r.get("sql")
-                if isinstance(sql_str, str) and len(sql_str) > 300:
-                    sql_str = sql_str[:300] + "..."
-                logger.info("tool_call read end connector_id=%s type=%s rows=%s cols=%s sql=%s error=%s", str(connector_id), ctype, rcount, ccount, sql_str, err)
-            else:
-                logger.info("tool_call read end connector_id=%s type=%s non_dict_result", str(connector_id), ctype)
-        except Exception:
-            pass
-        return parsed_r if isinstance(parsed_r, dict) else {"result": parsed_r}
-
-    tools = [list_schema, read]
-
-    # Prepare agent prompt with context
-    payload = {
-        "tenant_id": str(tenant_id),
-        "connectors": conn_summaries,
-        "canonical_summary": canonical_summary,
-        "connector_schemas": connector_schemas,
-        "connector_capabilities": connector_capabilities,
-    }
-    context_json = json.dumps(payload)
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", agent_instructions),
-        ("system", "Context for tools and planning (JSON): {context}"),
-        ("human", "{input}"),
-        MessagesPlaceholder("agent_scratchpad"),
-    ])
-
-    llm = _make_llm()
-    agent = create_openai_tools_agent(llm, tools, prompt)
-    executor = AgentExecutor(agent=agent, tools=tools, verbose=False, max_iterations=6, return_intermediate_steps=True)
-
+    Max turns are set per-session from tenant settings in run_chat_agent_stream.
+    """
+    hist = _THREAD_HISTORIES.setdefault(session_id, InMemoryChatMessageHistory())
     try:
-        result = executor.invoke({"input": message, "context": context_json})
-    except Exception as e:
-        logger.exception("Agent execution failed: %s", e)
-        result = {"output": "I could not execute the tools due to an internal error.", "intermediate_steps": []}
-
-    # Extract any tabular observations from intermediate steps if not already captured
-    try:
-        inter = result.get("intermediate_steps", []) or []
-        for step in inter:
-            # step is typically a tuple (AgentAction, observation)
-            if isinstance(step, (list, tuple)) and len(step) == 2:
-                ob = step[1]
-                if isinstance(ob, dict) and isinstance(ob.get("columns"), list) and isinstance(ob.get("rows"), list):
-                    if data_preview is None:
-                        data_preview = {"columns": ob.get("columns"), "rows": ob.get("rows")[:50]}
-                        route_meta = {
-                            "tool": "read",
-                            "connector_id": str(ob.get("connector_id", "")),
-                            "connector_type": str(ob.get("connector_type", "")),
-                        }
-                    previews.append({
-                        "connector_id": str(ob.get("connector_id", "")),
-                        "connector_type": str(ob.get("connector_type", "")),
-                        "columns": ob.get("columns"),
-                        "rows": (ob.get("rows") or [])[:50],
-                    })
+        max_turns = int(_SESSION_MAX_TURNS.get(session_id, 20))
+        msgs = getattr(hist, "messages", None)
+        if isinstance(msgs, list) and max_turns > 0:
+            # Keep last 2*max_turns messages (approx pairs)
+            limit = 2 * max_turns
+            if len(msgs) > limit:
+                hist.messages = msgs[-limit:]
     except Exception:
         pass
+    return hist
 
-    answer_text = str(result.get("output", "")).strip() or ""
-    plans: List[Dict[str, Any]] = []
-    clarifications: List[str] = []
-
-    return {
-        "answer": answer_text,
-        "plans": plans,
-        "clarifications": clarifications,
-        "route": route_meta,
-        "data_preview": data_preview,
-    }
-
-
-async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str):
+async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thread_id: Optional[str] = None):
     """Yield Server-Sent Events using LangChain's astream_events for minimal maintenance.
     Events: token, thought (agent logs), tool_start, tool_end, final, done
     """
@@ -682,6 +723,9 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str):
         "Then outline a short, structured plan of the logical steps you will follow. "
         "As you execute tool calls, narrate progress succinctly and sequentially. "
         "Finish by summarizing the completed work distinctly from your upfront plan. "
+        "If the user asks for a chart/graph/plot, you MUST run the appropriate read tool(s) to produce a compact table (e.g., period vs metric) suitable for plotting, with small LIMITs. "
+        "Do NOT say that you cannot create charts; the application will render charts from your tabular result. "
+        "For time ranges like 'last 3 quarters', compute those periods and aggregate accordingly. "
         "After gathering, produce a concise final answer to the user. Do not output JSON; respond with natural language."
     )
 
@@ -689,117 +733,22 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str):
     data_preview: Optional[Dict[str, Any]] = None
     route_meta: Optional[Dict[str, str]] = None
 
-    @tool
-    def list_schema(connector_id: str) -> Dict[str, Any]:
-        """Return a compact schema summary for a connector to help decide what to read."""
-        conn_for_plan = next((c for c in connectors if str(c.connector_id) == str(connector_id)), None)
-        if not conn_for_plan:
-            try:
-                logger.info("tool_call[list_schema] error connector_not_found connector_id=%s", str(connector_id))
-            except Exception:
-                pass
-            return {"error": "connector not found"}
-        ctype = _normalize_connector_type(conn_for_plan.type)
-        adapter = ADAPTERS.get(ctype)
-        if not adapter or not adapter.get("list_schema"):
-            try:
-                logger.info("tool_call[list_schema] error unsupported_type connector_id=%s type=%s", str(connector_id), ctype)
-            except Exception:
-                pass
-            return {"error": f"unsupported connector type: {ctype}"}
-        try:
-            logger.info("tool_call[list_schema] start connector_id=%s type=%s", str(connector_id), ctype)
-        except Exception:
-            pass
-        out = adapter["list_schema"](conn_for_plan, connector_schemas.get(str(connector_id)))
-        try:
-            tables = (out or {}).get("tables") if isinstance(out, dict) else None
-            tcount = len(tables) if isinstance(tables, list) else None
-            logger.info("tool_call[list_schema] end connector_id=%s type=%s tables=%s", str(connector_id), ctype, tcount)
-        except Exception:
-            pass
-        return out
-
-    @tool
-    def read(connector_id: str, spec: Optional[dict | str] = None) -> Dict[str, Any]:
-        """Read data from a connector using a connector-specific spec. Include a LIMIT when applicable."""
+    def _on_rows(connector_id: str, connector_type: str, columns: List[Any], rows: List[List[Any]]) -> None:
         nonlocal data_preview, route_meta
-        conn_for_plan = next((c for c in connectors if str(c.connector_id) == str(connector_id)), None)
-        if not conn_for_plan or not isinstance(getattr(conn_for_plan, "config", None), dict):
-            try:
-                logger.info("tool_call[read] error connector_not_found connector_id=%s", str(connector_id))
-            except Exception:
-                pass
-            return {"error": "connector not found"}
-        ctype = _normalize_connector_type(conn_for_plan.type)
-        adapter = ADAPTERS.get(ctype)
-        if not adapter or not adapter.get("read"):
-            try:
-                logger.info("tool_call[read] error unsupported_type connector_id=%s type=%s", str(connector_id), ctype)
-            except Exception:
-                pass
-            return {"error": f"unsupported connector type: {ctype}"}
-        # For Google Sheets, allow resolving entity_id from entity/name using current schema
-        if ctype == "google_drive" and isinstance(spec, dict):
-            try:
-                es = spec.get("entity_id")
-                if not es:
-                    entity_name = spec.get("entity") or spec.get("name") or spec.get("table")
-                    if isinstance(entity_name, str):
-                        schema_summary = connector_schemas.get(str(connector_id)) or {}
-                        tables = schema_summary.get("tables") or []
-                        norm_target = _normalize_identifier(entity_name)
-                        found_eid = None
-                        for t in tables:
-                            tname = t.get("name")
-                            tid = t.get("entity_id")
-                            if not isinstance(tname, str):
-                                continue
-                            tparts = tname.split("/", 1)
-                            sheet_part = tparts[-1].strip() if tparts else tname
-                            if entity_name.strip() == tname or entity_name.strip() == sheet_part or _normalize_identifier(tname) == norm_target or _normalize_identifier(sheet_part) == norm_target:
-                                if isinstance(tid, str):
-                                    found_eid = tid
-                                    break
-                        if found_eid:
-                            spec = dict(spec)
-                            spec["entity_id"] = found_eid
-            except Exception:
-                pass
+        if data_preview is None:
+            data_preview = {"columns": columns, "rows": rows[:50]}
+            route_meta = {"tool": "read", "connector_id": str(connector_id), "connector_type": connector_type}
+        previews.append({
+            "connector_id": str(connector_id),
+            "connector_type": connector_type,
+            "columns": columns,
+            "rows": rows[:50],
+        })
 
-        try:
-            spec_str = spec if isinstance(spec, str) else json.dumps(spec) if spec is not None else "null"
-            if isinstance(spec_str, str) and len(spec_str) > 500:
-                spec_str = spec_str[:500] + "..."
-            logger.info("tool_call[read] start connector_id=%s type=%s spec=%s", str(connector_id), ctype, spec_str)
-        except Exception:
-            pass
-        parsed_r = adapter["read"](conn_for_plan, {"connector_id": str(connector_id), "spec": spec})
-        if isinstance(parsed_r, dict):
-            parsed_r.setdefault("connector_id", str(connector_id))
-            parsed_r.setdefault("connector_type", ctype)
-            cols, rows = parsed_r.get("columns"), parsed_r.get("rows")
-            if isinstance(cols, list) and isinstance(rows, list):
-                if data_preview is None:
-                    data_preview = {"columns": cols, "rows": rows[:50]}
-                    route_meta = {"tool": "read", "connector_id": str(connector_id), "connector_type": ctype}
-                previews.append({"connector_id": str(connector_id), "connector_type": ctype, "columns": cols, "rows": rows[:50]})
-        try:
-            if isinstance(parsed_r, dict):
-                err = parsed_r.get("error")
-                rcount = len(parsed_r.get("rows")) if isinstance(parsed_r.get("rows"), list) else None
-                ccount = len(parsed_r.get("columns")) if isinstance(parsed_r.get("columns"), list) else None
-                sql_str = parsed_r.get("sql")
-                if isinstance(sql_str, str) and len(sql_str) > 300:
-                    sql_str = sql_str[:300] + "..."
-                logger.info("tool_call[read] end connector_id=%s type=%s rows=%s cols=%s sql=%s error=%s", str(connector_id), ctype, rcount, ccount, sql_str, err)
-            else:
-                logger.info("tool_call[read] end connector_id=%s type=%s non_dict_result", str(connector_id), ctype)
-        except Exception:
-            pass
-        return parsed_r if isinstance(parsed_r, dict) else {"result": parsed_r}
+    tools = make_generic_tools(connectors, connector_schemas, on_rows=_on_rows)
 
-    tools = [list_schema, read]
+    glossary_ctx = _glossary_context_for_query(db, tenant_id, message)
+    chart_intent = _extract_chart_intent(message)
 
     payload = {
         "tenant_id": str(tenant_id),
@@ -807,23 +756,123 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str):
         "canonical_summary": canonical_summary,
         "connector_schemas": connector_schemas,
         "connector_capabilities": connector_capabilities,
+        "glossary_context": glossary_ctx,
+        "chart_intent": chart_intent,
     }
+
     context_json = json.dumps(payload)
     prompt = ChatPromptTemplate.from_messages([
         ("system", agent_instructions),
         ("system", "Context for tools and planning (JSON): {context}"),
+        ("system", "Charting rules (Result Contract): If chart_intent.want_chart is true, your **final tool call** MUST return a small, aggregated table in one of these shapes:\n"
+                    "A) [x, y] where x is temporal OR categorical, and y is a single numeric aggregate (COUNT/SUM/AVG). 5–100 rows.\n"
+                    "B) [x, series, value] where x is temporal OR categorical, series is a short label, and value is numeric. 5–100 rows.\n"
+                    "Do NOT return entity-level rows (ids/emails/order lines). Use GROUP BY and aggregations. If you cannot determine the aggregation, ask one brief clarification before calling tools.\n"
+                    "SQL examples:\n"
+                    " - Temporal: SELECT date_trunc('month', created_at) AS period, COUNT(*) AS orders FROM sales.orders GROUP BY 1 ORDER BY 1 LIMIT 100\n"
+                    " - Categorical: SELECT status AS x, COUNT(*) AS y FROM tickets GROUP BY 1 ORDER BY 2 DESC LIMIT 50\n"
+                    " - Multi-series: SELECT date_trunc('week', created_at) AS period, channel AS series, COUNT(*) AS value FROM events GROUP BY 1,2 ORDER BY 1 LIMIT 100\n"),
+        ("system", "If glossary_context.terms contains any term mentioned or implied by the user, you MUST use the provided mappings exactly (expressions/filters) and MUST NOT substitute alternative definitions. "
+                   "Prefer mappings with higher confidence. When you explain your answer, concisely reflect the provided rationale where helpful. "
+                   "If no mappings are given for a relevant term, ask a brief clarification rather than assuming a definition."),
+        MessagesPlaceholder("chat_history"),
         ("human", "{input}"),
         MessagesPlaceholder("agent_scratchpad"),
     ])
 
-    llm = _make_llm()
+    llm = _make_llm_for_tenant(db, tenant_id)
     agent = create_openai_tools_agent(llm, tools, prompt)
     executor = AgentExecutor(agent=agent, tools=tools, verbose=False, max_iterations=6, return_intermediate_steps=False)
+    # Configure per-session chat history window from tenant settings
+    try:
+        settings = get_tenant_settings(db, tenant_id)
+        max_turns_cfg = int(get_setting(settings, "CHAT_HISTORY_MAX_TURNS", 20))
+    except Exception:
+        max_turns_cfg = 20
 
+    runnable = RunnableWithMessageHistory(
+        executor,
+        _history_for_session,
+        input_messages_key="input",
+        history_messages_key="chat_history",
+    )
+    # Back-compat: allow passing a MessageHistory object instead of thread_id
+    provided_history = None
+    if isinstance(thread_id, MessageHistory):
+        provided_history = thread_id
+        thread_id = "__inline__"
+    session_id = _session_key(tenant_id, thread_id)
+    _SESSION_MAX_TURNS[session_id] = max_turns_cfg
+    if provided_history is not None:
+        _THREAD_HISTORIES[session_id] = provided_history.to_langchain()
+
+    # Usage capture (best-effort)
+    import time
+    t0 = time.time()
+    usage_input = 0
+    usage_output = 0
+    usage_total = 0
+
+    class _UsageCapture(BaseCallbackHandler):
+        def __init__(self) -> None:
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.total_tokens = 0
+
+        def on_chat_model_end(self, response, **kwargs):  # type: ignore[override]
+            try:
+                usage = None
+                
+                # OpenAI via LangChain often exposes token counts here
+                usage = getattr(response, "usage_metadata", None)
+                if not usage:
+                    gens = getattr(response, "generations", None)
+                    if gens and len(gens) > 0 and len(gens[0]) > 0:
+                        gi = getattr(gens[0][0], "generation_info", None) or {}
+                        usage = gi.get("usage") or gi.get("token_usage") or gi
+                if not usage:
+                    lo = getattr(response, "llm_output", None) or {}
+                    if isinstance(lo, dict):
+                        usage = lo.get("token_usage") or lo.get("usage")
+                if isinstance(usage, dict):
+                    pi = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+                    co = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+                    tt = int(usage.get("total_tokens") or (pi + co))
+                    self.input_tokens += pi
+                    self.output_tokens += co
+                    self.total_tokens += tt
+            except Exception:
+                pass
+
+        def on_llm_end(self, response, **kwargs):  # type: ignore[override]
+            # Fallback for non-chat models
+            try:
+                usage = getattr(response, "usage_metadata", None)
+                if not usage:
+                    lo = getattr(response, "llm_output", None) or {}
+                    if isinstance(lo, dict):
+                        usage = lo.get("token_usage") or lo.get("usage")
+                if isinstance(usage, dict):
+                    pi = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+                    co = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+                    tt = int(usage.get("total_tokens") or (pi + co))
+                    self.input_tokens += pi
+                    self.output_tokens += co
+                    self.total_tokens += tt
+            except Exception:
+                pass
+
+    usage_cb = _UsageCapture()
+
+    charts_payload: Optional[List[Dict[str, Any]]] = None
     try:
         # Send an initial event to prompt clients to render immediately
         yield "event: ready\ndata: {}\n\n"
-        async for ev in executor.astream_events({"input": message, "context": context_json}, version="v2"):
+        async for ev in runnable.astream_events(
+            {"input": message, "context": context_json},
+            config={"configurable": {"session_id": session_id}, "callbacks": [usage_cb]},
+            version="v2",
+        ):
             etype = ev.get("event")
             data = ev.get("data", {}) or {}
             # Stream tokens
@@ -841,26 +890,159 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str):
                 inp = data.get("input")
                 yield f"event: tool_start\ndata: {json.dumps({'tool': name, 'input': str(inp)})}\n\n"
             elif etype == "on_tool_end":
-                outp = data.get("output")
+                out_full = data.get("output")
+                # Capture preview from tool output if on_rows callback hasn't set it yet
+                try:
+                    if (
+                        data_preview is None
+                        and isinstance(out_full, dict)
+                        and isinstance(out_full.get("columns"), list)
+                        and isinstance(out_full.get("rows"), list)
+                    ):
+                        data_preview = {
+                            "columns": out_full.get("columns"),
+                            "rows": (out_full.get("rows") or [])[:50],
+                        }
+                except Exception:
+                    pass
+                # Populate route metadata from tool output if available
+                try:
+                    if route_meta is None and isinstance(out_full, dict):
+                        cid = out_full.get("connector_id")
+                        ctype = out_full.get("connector_type")
+                        if isinstance(cid, str) and cid:
+                            route_meta = {"tool": "read", "connector_id": str(cid), "connector_type": str(ctype or "")}
+                except Exception:
+                    pass
                 # truncate rows in outputs to keep SSE light
+                outp = out_full
                 if isinstance(outp, dict) and isinstance(outp.get("rows"), list):
                     outp = dict(outp)
                     outp["rows"] = outp["rows"][:5]
                 yield f"event: tool_end\ndata: {json.dumps(outp)}\n\n"
+            # Usage accumulation if provided by backend
+            elif etype in ("on_llm_end", "on_chat_model_end"):
+                try:
+                    usage = None
+                    if isinstance(data, dict):
+                        # Prefer direct usage fields present in OpenAI stream end
+                        usage = (
+                            data.get("usage")
+                            or data.get("usage_metadata")
+                            or data.get("generation_info", {}).get("usage")
+                        )
+                        if not usage:
+                            resp = data.get("response") or {}
+                            if isinstance(resp, dict):
+                                usage = resp.get("usage") or resp.get("usage_metadata")
+                        # Fallback: parse from stringified output if present
+                        if not usage:
+                            try:
+                                out_s = str(data.get("output") or "")
+                                idx = out_s.find("usage_metadata=")
+                                if idx != -1:
+                                    start = idx + len("usage_metadata=")
+                                    # capture balanced braces
+                                    depth = 0
+                                    j = start
+                                    started = False
+                                    while j < len(out_s):
+                                        ch = out_s[j]
+                                        if ch == '{':
+                                            depth += 1
+                                            started = True
+                                        elif ch == '}':
+                                            depth -= 1
+                                            if started and depth == 0:
+                                                j += 1
+                                                break
+                                        j += 1
+                                    blob = out_s[start:j]
+                                    # Safely evaluate python-literal dict
+                                    import ast
+                                    parsed = ast.literal_eval(blob)
+                                    if isinstance(parsed, dict):
+                                        usage = parsed
+                            except Exception:
+                                pass
+                    if isinstance(usage, dict):
+                        pi = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+                        co = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+                        tt = int(usage.get("total_tokens") or (pi + co))
+                        usage_input += pi
+                        usage_output += co
+                        usage_total += tt
+                except Exception:
+                    pass
             # Agent thoughts (optional: use action logs from events)
             elif etype == "on_agent_action" or etype == "on_chain_start":
                 log = data.get("action") or data.get("name") or ""
                 yield f"event: thought\ndata: {json.dumps({'log': str(log)})}\n\n"
             elif etype == "on_chain_end":
                 final = data.get("output", "")
+                # Sanitize common disclaimers about charting since the app renders charts
+                try:
+                    fs = str(final)
+                    lower = fs.lower()
+                    bad_phrases = [
+                        "can't create visual",
+                        "cannot create visual",
+                        "can't create charts",
+                        "cannot create charts",
+                        "can't create a chart",
+                        "cannot create a chart",
+                    ]
+                    if any(p in lower for p in bad_phrases):
+                        fs = re.sub(r"(?i)\b(can('|’)t|cannot)\s+create\s+(visual|chart|charts)[^\.]*\.?\s*", "", fs).strip()
+                        if not fs:
+                            fs = "Here is a concise summary based on your request."
+                        final = fs
+                except Exception:
+                    pass
                 payload = {"answer": str(final)}
                 if route_meta:
                     payload["route"] = route_meta
                 if data_preview and isinstance(data_preview, dict) and data_preview.get("columns") is not None:
                     payload["data_preview"] = data_preview
+                # Server-driven chart generation (based on user message and preview)
+                try:
+                    charts_payload = _build_charts_from_preview(message, data_preview)
+                    if charts_payload:
+                        payload["charts"] = charts_payload
+                except Exception:
+                    charts_payload = None
                 yield f"event: final\ndata: {json.dumps(payload)}\n\n"
     except Exception as e:
         logger.exception("astream_events failed: %s", e)
         yield f"event: error\ndata: {json.dumps(str(e))}\n\n"
     finally:
+        # Log usage best-effort
+        try:
+            settings = get_tenant_settings(db, tenant_id)
+            provider = str(get_setting(settings, "LLM_PROVIDER", "openai")).lower()
+            model = str(get_setting(settings, "LLM_MODEL", "gpt-4o"))
+            route_str = None
+            if route_meta:
+                try:
+                    route_str = json.dumps(route_meta)
+                except Exception:
+                    route_str = str(route_meta)
+            log_usage_event(
+                db,
+                tenant_id=str(tenant_id),
+                provider=provider,
+                model=model,
+                operation="chat",
+                category="chat",
+                module="chat_module",
+                input_tokens=int(usage_cb.input_tokens or usage_input) if (usage_cb.input_tokens or usage_input) else None,
+                output_tokens=int(usage_cb.output_tokens or usage_output) if (usage_cb.output_tokens or usage_output) else None,
+                total_tokens=int(usage_cb.total_tokens or usage_total) if (usage_cb.total_tokens or usage_total) else None,
+                request_id=None,
+                thread_id=str(thread_id) if isinstance(thread_id, str) else None,
+                route=route_str,
+                latency_ms=int((time.time() - t0) * 1000),
+            )
+        except Exception:
+            pass
         yield "event: done\ndata: {}\n\n"

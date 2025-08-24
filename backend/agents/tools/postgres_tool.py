@@ -1,4 +1,5 @@
 """
+postgres_tool.py
 Postgres tool for LangGraph agent
 - Exposes a safe, read-only SQL execution tool per connector.
 - Validates input SQL (SELECT-only), enforces LIMIT and statement timeout.

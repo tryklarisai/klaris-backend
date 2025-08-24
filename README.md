@@ -71,6 +71,42 @@ GET /api/v1/tenants/{tenant_id}
 GET /api/v1/tenants
 ```
 
+### Business Context Layer (BCL)
+
+- Upload document (CSV/XLSX/TXT)
+```
+POST /api/v1/bcl/documents/upload
+Headers: Authorization: Bearer <JWT> (or X-API-Key + X-Tenant-ID in dev)
+Body: multipart/form-data { file }
+```
+
+- Import business glossary (CSV/XLSX)
+```
+POST /api/v1/bcl/glossary/import
+Headers: Authorization: Bearer <JWT> (or X-API-Key + X-Tenant-ID in dev)
+Body: multipart/form-data { file }
+```
+
+- Ground a query into relevant terms and evidence
+```
+POST /api/v1/bcl/ground
+Headers: Authorization: Bearer <JWT>
+Body: { "query": "total revenue last quarter", "top_k_terms": 5, "top_k_evidence": 5 }
+```
+
+- CRUD Mappings
+```
+GET /api/v1/bcl/terms/{term_id}/mappings
+POST /api/v1/bcl/terms/{term_id}/mappings
+PUT /api/v1/bcl/mappings/{mapping_id}
+DELETE /api/v1/bcl/mappings/{mapping_id}
+```
+
+### Frontend
+
+- New page: `/bcl` with tabs for Upload, Glossary, and Ground
+  - Uses the above APIs with JWT from login
+
 ---
 ## Environment Variables
 - `DATABASE_URL` (default: `postgresql://postgres:postgres@db:5432/postgres`)

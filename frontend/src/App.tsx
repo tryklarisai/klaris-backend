@@ -9,8 +9,10 @@ import DashboardPage from "./pages/DashboardPage";
 import ConnectorsPage from "./pages/ConnectorsPage";
 import ConnectorDetailPage from "./pages/ConnectorDetailPage";
 import DataRelationshipsPage from "./pages/DataRelationshipsPage";
-import BusinessContextPage from "./pages/BusinessContextPage";
 import ChatPage from "./pages/ChatPage";
+import BclPage from "./pages/BclPage";
+import ProfilePage from "./pages/ProfilePage";
+import UsagePage from "./pages/UsagePage";
 
 function App() {
   return (
@@ -21,14 +23,18 @@ function App() {
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/login" element={<LoginPage />} />
             <Route path="/" element={<DashboardLayout />}>
-              <Route index element={<Navigate to="/connectors" replace />} />
+              <Route index element={<ChatPage />} />
+              <Route path="dashboard" element={<DashboardPage />} />
               <Route path="connectors" element={<ConnectorsPage />} />
               <Route path="connectors/:connectorId" element={<ConnectorDetailPage />} />
               <Route path="relationships" element={<DataRelationshipsPage />} />
-              <Route path="business-context" element={<BusinessContextPage />} />
+              <Route path="bcl" element={<BclPage />} />
+              <Route path="usage" element={<UsagePage />} />
+              <Route path="profile" element={<ProfilePage />} />
               <Route path="chat" element={<ChatPage />} />
+              <Route path="chat/:threadId" element={<ChatPage />} />
             </Route>
-            <Route path="*" element={<Navigate to="/connectors" replace />} />
+            <Route path="*" element={<Navigate to="/chat" replace />} />
           </Routes>
         </Router>
       </SnackbarProvider>
