@@ -531,6 +531,7 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                     {config.googleApiKey && data?.config?.oauth_refresh_token ? (
                       <Button
                         variant="outlined"
+                        title="Opens Google Drive file picker. You can close it by clicking the X button or pressing Escape key."
                         onClick={async () => {
                           try {
                             // Get fresh token first
@@ -555,7 +556,13 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                                 setSavingSelection(true);
                                 try {
                                   const token = window.localStorage.getItem('klaris_jwt');
-                                  const fileIds = documents.map(doc => doc.id);
+                                  const newFileIds = documents.map(doc => doc.id);
+                                  
+                                  // Get existing selected files and append new ones
+                                  const existingFileIds = data?.connector_metadata?.selected_drive_file_ids || [];
+                                  const combinedArray = [...existingFileIds, ...newFileIds];
+                                  const combinedFileIds = Array.from(new Set(combinedArray)); // Remove duplicates
+                                  
                                   const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
                                     method: 'PATCH',
                                     headers: {
@@ -563,15 +570,15 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                                       'Content-Type': 'application/json',
                                     },
                                     body: JSON.stringify({
-                                      connector_metadata: { selected_drive_file_ids: fileIds }
+                                      connector_metadata: { selected_drive_file_ids: combinedFileIds }
                                     }),
                                   });
                                   if (!resp.ok) throw new Error('Failed to save selection');
                                   await fetchDetail();
-                                  notify('Files selected successfully', 'success');
+                                  notify(`${newFileIds.length} files added successfully`, 'success');
                                   
                                   // Auto-proceed to schema discovery if in setup flow
-                                  if (autoFileSelection && fileIds.length > 0) {
+                                  if (autoFileSelection && combinedFileIds.length > 0) {
                                     setAutoFileSelection(false);
                                     setAutoSchemaFetch(true);
                                     setTimeout(() => {
@@ -586,6 +593,7 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                               },
                               () => {
                                 console.log('Google Drive Picker cancelled');
+                                notify('File selection cancelled', 'info');
                               },
                               {
                                 title: 'Select files from Google Drive',
@@ -601,12 +609,13 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                         disabled={savingSelection}
                       >
                         {data?.connector_metadata?.selected_drive_file_ids?.length
-                          ? 'Edit Selection'
+                          ? `Add More Files (${data.connector_metadata.selected_drive_file_ids.length} selected)`
                           : 'Select Google Drive Files'}
                       </Button>
                     ) : config.googleApiKey && data?.config?.oauth_access_token ? (
                       <Button
                         variant="outlined"
+                        title="Opens Google Drive file picker. You can close it by clicking the X button or pressing Escape key."
                         onClick={async () => {
                           try {
                             // Try to get fresh token first (this will use existing token if not expired)
@@ -638,7 +647,13 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                                 setSavingSelection(true);
                                 try {
                                   const token = window.localStorage.getItem('klaris_jwt');
-                                  const fileIds = documents.map(doc => doc.id);
+                                  const newFileIds = documents.map(doc => doc.id);
+                                  
+                                  // Get existing selected files and append new ones
+                                  const existingFileIds = data?.connector_metadata?.selected_drive_file_ids || [];
+                                  const combinedArray = [...existingFileIds, ...newFileIds];
+                                  const combinedFileIds = Array.from(new Set(combinedArray)); // Remove duplicates
+                                  
                                   const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
                                     method: 'PATCH',
                                     headers: {
@@ -646,15 +661,15 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                                       'Content-Type': 'application/json',
                                     },
                                     body: JSON.stringify({
-                                      connector_metadata: { selected_drive_file_ids: fileIds }
+                                      connector_metadata: { selected_drive_file_ids: combinedFileIds }
                                     }),
                                   });
                                   if (!resp.ok) throw new Error('Failed to save selection');
                                   await fetchDetail();
-                                  notify('Files selected successfully', 'success');
+                                  notify(`${newFileIds.length} files added successfully`, 'success');
                                   
                                   // Auto-proceed to schema discovery if in setup flow
-                                  if (autoFileSelection && fileIds.length > 0) {
+                                  if (autoFileSelection && combinedFileIds.length > 0) {
                                     setAutoFileSelection(false);
                                     setAutoSchemaFetch(true);
                                     setTimeout(() => {
@@ -669,6 +684,7 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                               },
                               () => {
                                 console.log('Google Drive Picker cancelled');
+                                notify('File selection cancelled', 'info');
                               },
                               {
                                 title: 'Select files from Google Drive',
@@ -684,7 +700,7 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                         disabled={savingSelection}
                       >
                         {data?.connector_metadata?.selected_drive_file_ids?.length
-                          ? 'Edit Selection'
+                          ? `Add More Files (${data.connector_metadata.selected_drive_file_ids.length} selected)`
                           : 'Select Google Drive Files'}
                       </Button>
                     ) : (
@@ -716,6 +732,7 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                           <TableRow>
                             <TableCell>Name</TableCell>
                             <TableCell>Type</TableCell>
+                            <TableCell width="60">Action</TableCell>
                           </TableRow>
                         </TableHead>
                         <TableBody>
@@ -723,6 +740,40 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                             <TableRow key={f.id}>
                               <TableCell>{f.name}</TableCell>
                               <TableCell>{f.mimeType}</TableCell>
+                              <TableCell>
+                                <IconButton 
+                                  size="small" 
+                                  color="error"
+                                  onClick={async () => {
+                                    try {
+                                      // Remove this file from the selection
+                                      const currentFileIds = data?.connector_metadata?.selected_drive_file_ids || [];
+                                      const updatedFileIds = currentFileIds.filter((id: string) => id !== f.id);
+                                      
+                                      const token = window.localStorage.getItem('klaris_jwt');
+                                      const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
+                                        method: 'PATCH',
+                                        headers: {
+                                          'Authorization': `Bearer ${token}`,
+                                          'Content-Type': 'application/json',
+                                        },
+                                        body: JSON.stringify({
+                                          connector_metadata: { selected_drive_file_ids: updatedFileIds }
+                                        }),
+                                      });
+                                      
+                                      if (!resp.ok) throw new Error('Failed to remove file');
+                                      await fetchDetail();
+                                      notify('File removed successfully', 'success');
+                                    } catch (err: any) {
+                                      notify(err.message || 'Failed to remove file', 'error');
+                                    }
+                                  }}
+                                  title="Remove file"
+                                >
+                                  <DeleteIcon fontSize="small" />
+                                </IconButton>
+                              </TableCell>
                             </TableRow>
                           ))}
                         </TableBody>
