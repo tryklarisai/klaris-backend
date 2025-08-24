@@ -49,6 +49,7 @@ JWT_ALGORITHM = "HS256"
 PUBLIC_PATH_PREFIXES = [
     "/api/health",
     "/api/v1/auth/login",
+    "/api/v1/tenants",  # Tenant registration (POST only)
     "/api/v1/connectors/oauth",  # OAuth callbacks/flows
 ]
 
