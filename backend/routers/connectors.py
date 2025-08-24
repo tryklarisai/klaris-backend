@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, Request, Query
 from sqlalchemy.orm import Session
 from uuid import UUID
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.exc import IntegrityError
 
 from models.connector import Connector, ConnectorStatus
@@ -826,3 +826,124 @@ def delete_connector(
     db.delete(connector)
     db.commit()
     return None
+
+
+@router.post(
+    "/{connector_id}/refresh-token",
+    summary="Refresh OAuth token for Google Drive connector",
+    tags=["Connectors"],
+    response_model=ConnectorSummary,
+    responses={
+        200: {"description": "Token refreshed successfully"},
+        404: {"description": "Connector not found"},
+        400: {"description": "Token refresh failed or not a Google Drive connector"}
+    },
+)
+def refresh_connector_token(
+    tenant_id: str,
+    connector_id: str,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    """
+    Refresh OAuth token for a Google Drive connector
+    """
+    from utils.oauth_utils import refresh_google_oauth_token
+    
+    check_auth_and_tenant(credentials, tenant_id)
+    connector = db.query(Connector).filter_by(tenant_id=tenant_id, connector_id=connector_id).first()
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    
+    if connector.type != "gdrive":
+        raise HTTPException(status_code=400, detail="Token refresh only supported for Google Drive connectors")
+    
+    refresh_token = connector.config.get("oauth_refresh_token")
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="No refresh token available")
+    
+    access_token, new_refresh_token, expiry = refresh_google_oauth_token(refresh_token)
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Failed to refresh token")
+    
+    # Update connector config with new token
+    config = connector.config.copy()
+    config["oauth_access_token"] = access_token
+    if new_refresh_token and new_refresh_token != refresh_token:
+        config["oauth_refresh_token"] = new_refresh_token
+    if expiry:
+        config["token_expiry"] = expiry.isoformat()
+    
+    connector.config = config
+    connector.updated_at = datetime.utcnow()
+    db.commit()
+    
+    # Return updated connector
+    last_schema = db.query(Schema).filter_by(
+        connector_id=connector.connector_id
+    ).order_by(Schema.fetched_at.desc()).first()
+    schema_info = None
+    if last_schema:
+        schema_info = {
+            "schema_id": last_schema.schema_id,
+            "fetched_at": last_schema.fetched_at.isoformat(),
+            "raw_schema": last_schema.raw_schema,
+        }
+    
+    return ConnectorSummary(
+        connector_id=connector.connector_id,
+        name=connector.name,
+        type=connector.type,
+        status=connector.status.value,
+        created_at=connector.created_at.isoformat() if getattr(connector, 'created_at', None) else None,
+        last_schema_fetch=connector.last_schema_fetch.isoformat() if connector.last_schema_fetch else None,
+        error_message=connector.error_message,
+        schema=schema_info,
+        config=connector.config,
+        connector_metadata=connector.connector_metadata,
+    )
+
+
+@router.get(
+    "/{connector_id}/access-token",
+    summary="Get fresh OAuth access token for Google Drive connector",
+    tags=["Connectors"],
+    responses={
+        200: {"description": "Fresh access token returned"},
+        404: {"description": "Connector not found"},
+        400: {"description": "Token refresh failed or not a Google Drive connector"}
+    },
+)
+def get_fresh_access_token(
+    tenant_id: str,
+    connector_id: str,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    """
+    Get a fresh OAuth access token for a Google Drive connector, refreshing if necessary
+    """
+    from utils.oauth_utils import get_valid_google_credentials
+    
+    check_auth_and_tenant(credentials, tenant_id)
+    connector = db.query(Connector).filter_by(tenant_id=tenant_id, connector_id=connector_id).first()
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    
+    if connector.type not in ("gdrive", "google_drive"):
+        raise HTTPException(status_code=400, detail="Access token only available for Google Drive connectors")
+    
+    if not connector.config:
+        raise HTTPException(status_code=400, detail="Connector has no configuration")
+    
+    creds, updated_config = get_valid_google_credentials(connector.config)
+    if not creds:
+        raise HTTPException(status_code=400, detail="Failed to get valid credentials")
+    
+    # Update connector config if tokens were refreshed
+    if updated_config != connector.config:
+        connector.config = updated_config
+        connector.updated_at = datetime.utcnow()
+        db.commit()
+    
+    return {"access_token": creds.token}

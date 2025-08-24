@@ -1,6 +1,7 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Button, Alert, CircularProgress, Box } from '@mui/material';
 import { showGoogleDrivePicker, GOOGLE_DRIVE_MIME_TYPES } from '../utils/googlePicker';
+import { testGoogleApiKey, logGoogleApiKeyDebugInfo } from '../utils/googleApiKeyTest';
 
 interface GoogleDriveFile {
   id: string;
@@ -107,10 +108,31 @@ const GoogleDrivePicker: React.FC<GoogleDrivePickerProps> = ({
 }) => {
   const [isPickerLoading, setIsPickerLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [apiKeyValid, setApiKeyValid] = useState<boolean | null>(null);
+
+  // Test API key on mount
+  useEffect(() => {
+    if (developerKey) {
+      logGoogleApiKeyDebugInfo(developerKey);
+      testGoogleApiKey(developerKey).then(result => {
+        setApiKeyValid(result.valid);
+        if (!result.valid && result.error) {
+          console.error('Google API Key validation failed:', result.error);
+        }
+      });
+    } else {
+      setApiKeyValid(false);
+    }
+  }, [developerKey]);
 
   const handleShowPicker = useCallback(async () => {
     if (!accessToken || !developerKey) {
       setError('Missing access token or developer key');
+      return;
+    }
+
+    if (apiKeyValid === false) {
+      setError('Google API key is invalid. Please check your Google Cloud Console configuration.');
       return;
     }
 

@@ -67,6 +67,71 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
+  // Fresh token state
+  const [freshAccessToken, setFreshAccessToken] = useState<string | null>(null);
+
+  // Function to check if token is expired
+  const isTokenExpired = (tokenExpiryStr?: string): boolean => {
+    if (!tokenExpiryStr) return true;
+    
+    try {
+      const tokenExpiry = new Date(tokenExpiryStr);
+      const now = new Date();
+      // Consider token expired if it expires within 5 minutes (300 seconds)
+      const fiveMinutesFromNow = new Date(now.getTime() + 5 * 60 * 1000);
+      return tokenExpiry <= fiveMinutesFromNow;
+    } catch (error) {
+      console.warn('Error parsing token expiry:', error);
+      return true; // Consider expired if can't parse
+    }
+  };
+
+  // Function to get fresh access token (only refreshes if expired)
+  const getFreshAccessToken = async (): Promise<string | null> => {
+    const currentAccessToken = data?.config?.oauth_access_token;
+    const tokenExpiry = data?.config?.token_expiry;
+    const refreshToken = data?.config?.oauth_refresh_token;
+
+    if (!refreshToken) {
+      return currentAccessToken || null;
+    }
+
+    // Check if token is expired first
+    if (!isTokenExpired(tokenExpiry)) {
+      console.log('Token is still valid, using existing token');
+      return currentAccessToken || null;
+    }
+
+    console.log('Token is expired, refreshing...');
+
+    if (!tenantId || !connectorId) {
+      return currentAccessToken || null;
+    }
+
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      const response = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}/access-token`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        console.log('Successfully refreshed access token');
+        // Update the connector data to reflect the new token
+        await fetchDetail();
+        return result.access_token;
+      } else {
+        console.warn('Could not refresh access token, using existing token');
+        return currentAccessToken || null;
+      }
+    } catch (err) {
+      console.warn('Error fetching fresh access token:', err);
+      return currentAccessToken || null;
+    }
+  };
+
   useEffect(() => {
     const tStr = window.localStorage.getItem('klaris_tenant');
     if (!tStr) {
@@ -463,58 +528,165 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
               {data.type === 'google_drive' && (
                 <>
                   <Stack direction="row" gap={1} alignItems="center">
-                    {config.googleApiKey && data?.config?.oauth_access_token ? (
-                      <GoogleDrivePicker
-                        accessToken={data.config.oauth_access_token}
-                        developerKey={config.googleApiKey}
-                        onFilesSelected={async (files) => {
-                          setSavingSelection(true);
+                    {config.googleApiKey && data?.config?.oauth_refresh_token ? (
+                      <Button
+                        variant="outlined"
+                        onClick={async () => {
                           try {
-                            const token = window.localStorage.getItem('klaris_jwt');
-                            const fileIds = files.map(file => file.id);
-                            const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
-                              method: 'PATCH',
-                              headers: {
-                                'Authorization': `Bearer ${token}`,
-                                'Content-Type': 'application/json',
-                              },
-                              body: JSON.stringify({
-                                connector_metadata: { selected_drive_file_ids: fileIds }
-                              }),
-                            });
-                            if (!resp.ok) throw new Error('Failed to save selection');
-                            await fetchDetail();
-                            notify('Files selected successfully', 'success');
-                            
-                            // Auto-proceed to schema discovery if in setup flow
-                            if (autoFileSelection && fileIds.length > 0) {
-                              setAutoFileSelection(false);
-                              setAutoSchemaFetch(true);
-                              setTimeout(() => {
-                                handleFetchSchema();
-                              }, 500);
+                            // Get fresh token first
+                            const freshToken = await getFreshAccessToken();
+                            if (!freshToken) {
+                              notify('Unable to get valid access token', 'error');
+                              return;
                             }
-                          } catch (err: any) {
-                            notify(err.message || 'Failed to save selection', 'error');
-                          } finally {
-                            setSavingSelection(false);
+
+                            // Now show the picker with the fresh token
+                            const { showGoogleDrivePicker, GOOGLE_DRIVE_MIME_TYPES } = await import('../utils/googlePicker');
+                            
+                            if (!config.googleApiKey) {
+                              notify('Google API key is not configured', 'error');
+                              return;
+                            }
+                            
+                            await showGoogleDrivePicker(
+                              freshToken,
+                              config.googleApiKey,
+                              async (documents) => {
+                                setSavingSelection(true);
+                                try {
+                                  const token = window.localStorage.getItem('klaris_jwt');
+                                  const fileIds = documents.map(doc => doc.id);
+                                  const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
+                                    method: 'PATCH',
+                                    headers: {
+                                      'Authorization': `Bearer ${token}`,
+                                      'Content-Type': 'application/json',
+                                    },
+                                    body: JSON.stringify({
+                                      connector_metadata: { selected_drive_file_ids: fileIds }
+                                    }),
+                                  });
+                                  if (!resp.ok) throw new Error('Failed to save selection');
+                                  await fetchDetail();
+                                  notify('Files selected successfully', 'success');
+                                  
+                                  // Auto-proceed to schema discovery if in setup flow
+                                  if (autoFileSelection && fileIds.length > 0) {
+                                    setAutoFileSelection(false);
+                                    setAutoSchemaFetch(true);
+                                    setTimeout(() => {
+                                      handleFetchSchema();
+                                    }, 500);
+                                  }
+                                } catch (err: any) {
+                                  notify(err.message || 'Failed to save selection', 'error');
+                                } finally {
+                                  setSavingSelection(false);
+                                }
+                              },
+                              () => {
+                                console.log('Google Drive Picker cancelled');
+                              },
+                              {
+                                title: 'Select files from Google Drive',
+                                multiselect: true,
+                                includeFolders: true,
+                                mimeTypes: GOOGLE_DRIVE_MIME_TYPES.ALL_DOCUMENTS
+                              }
+                            );
+                          } catch (error: any) {
+                            notify(error.message || 'Failed to open Google Drive Picker', 'error');
                           }
                         }}
-                        onCancel={() => {
-                          console.log('Google Drive Picker cancelled');
-                        }}
-                        buttonText="Select Google Drive Files"
-                        editButtonText="Edit Selection"
-                        multiselect={true}
-                        includeFolders={true}
-                        mimeTypes={GOOGLE_DRIVE_MIME_TYPES.ALL_DOCUMENTS}
-                        pickerTitle="Select files from Google Drive"
                         disabled={savingSelection}
-                        loading={savingSelection}
-                        selectedFileIds={data?.connector_metadata?.selected_drive_file_ids || []}
+                      >
+                        {data?.connector_metadata?.selected_drive_file_ids?.length
+                          ? 'Edit Selection'
+                          : 'Select Google Drive Files'}
+                      </Button>
+                    ) : config.googleApiKey && data?.config?.oauth_access_token ? (
+                      <Button
                         variant="outlined"
-                        color="primary"
-                      />
+                        onClick={async () => {
+                          try {
+                            // Try to get fresh token first (this will use existing token if not expired)
+                            let tokenToUse = data.config.oauth_access_token;
+                            
+                            // If we have a refresh token, try to get a fresh token
+                            if (data?.config?.oauth_refresh_token) {
+                              try {
+                                const freshToken = await getFreshAccessToken();
+                                if (freshToken) {
+                                  tokenToUse = freshToken;
+                                }
+                              } catch (err) {
+                                console.warn('Could not refresh token, using existing token');
+                              }
+                            }
+
+                            if (!config.googleApiKey) {
+                              notify('Google API key is not configured', 'error');
+                              return;
+                            }
+
+                            // Now show the picker with the token
+                            const { showGoogleDrivePicker, GOOGLE_DRIVE_MIME_TYPES } = await import('../utils/googlePicker');
+                            await showGoogleDrivePicker(
+                              tokenToUse,
+                              config.googleApiKey,
+                              async (documents) => {
+                                setSavingSelection(true);
+                                try {
+                                  const token = window.localStorage.getItem('klaris_jwt');
+                                  const fileIds = documents.map(doc => doc.id);
+                                  const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
+                                    method: 'PATCH',
+                                    headers: {
+                                      'Authorization': `Bearer ${token}`,
+                                      'Content-Type': 'application/json',
+                                    },
+                                    body: JSON.stringify({
+                                      connector_metadata: { selected_drive_file_ids: fileIds }
+                                    }),
+                                  });
+                                  if (!resp.ok) throw new Error('Failed to save selection');
+                                  await fetchDetail();
+                                  notify('Files selected successfully', 'success');
+                                  
+                                  // Auto-proceed to schema discovery if in setup flow
+                                  if (autoFileSelection && fileIds.length > 0) {
+                                    setAutoFileSelection(false);
+                                    setAutoSchemaFetch(true);
+                                    setTimeout(() => {
+                                      handleFetchSchema();
+                                    }, 500);
+                                  }
+                                } catch (err: any) {
+                                  notify(err.message || 'Failed to save selection', 'error');
+                                } finally {
+                                  setSavingSelection(false);
+                                }
+                              },
+                              () => {
+                                console.log('Google Drive Picker cancelled');
+                              },
+                              {
+                                title: 'Select files from Google Drive',
+                                multiselect: true,
+                                includeFolders: true,
+                                mimeTypes: GOOGLE_DRIVE_MIME_TYPES.ALL_DOCUMENTS
+                              }
+                            );
+                          } catch (error: any) {
+                            notify(error.message || 'Failed to open Google Drive Picker', 'error');
+                          }
+                        }}
+                        disabled={savingSelection}
+                      >
+                        {data?.connector_metadata?.selected_drive_file_ids?.length
+                          ? 'Edit Selection'
+                          : 'Select Google Drive Files'}
+                      </Button>
                     ) : (
                       <Button
                         variant="outlined"

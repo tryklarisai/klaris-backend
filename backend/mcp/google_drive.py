@@ -10,6 +10,7 @@ import os
 from google.oauth2.credentials import Credentials as GoogleCredentials
 from googleapiclient.discovery import build as google_build
 import pandas as pd
+from utils.oauth_utils import get_valid_google_credentials
 
 class GoogleDriveMCPAdapter:
     @staticmethod
@@ -19,21 +20,10 @@ class GoogleDriveMCPAdapter:
         Returns only document files (.docx, .doc, .txt, .pdf) and spreadsheets, excluding folders.
         Returns a list of dicts with id, name, mimeType, sorted by modifiedTime descending, limit 1000.
         """
-        access_token = config.get("oauth_access_token")
-        refresh_token = config.get("oauth_refresh_token")
-        token_uri = "https://oauth2.googleapis.com/token"
-        client_id = os.getenv("GOOGLE_CLIENT_ID")
-        client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-        if not all([access_token, refresh_token, client_id, client_secret]):
-            raise RuntimeError("Missing Google Drive credentials/config.")
+        creds, updated_config = get_valid_google_credentials(config)
+        if not creds:
+            raise RuntimeError("Missing Google Drive credentials/config or failed to refresh token.")
 
-        creds = GoogleCredentials(
-            token=access_token,
-            refresh_token=refresh_token,
-            token_uri=token_uri,
-            client_id=client_id,
-            client_secret=client_secret
-        )
         drive_service = google_build("drive", "v3", credentials=creds)
 
         # Define allowed MIME types for document files and schema data
@@ -76,21 +66,10 @@ class GoogleDriveMCPAdapter:
         Lists all files/folders, for each spreadsheet returns up to 10 sample rows (random if >10).
         Optionally, filters files by selected_drive_file_ids in metadata.
         """
-        access_token = config.get("oauth_access_token")
-        refresh_token = config.get("oauth_refresh_token")
-        token_uri = "https://oauth2.googleapis.com/token"
-        client_id = os.getenv("GOOGLE_CLIENT_ID")
-        client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-        if not all([access_token, refresh_token, client_id, client_secret]):
-            raise RuntimeError("Missing Google Drive credentials/config.")
+        creds, updated_config = get_valid_google_credentials(config)
+        if not creds:
+            raise RuntimeError("Missing Google Drive credentials/config or failed to refresh token.")
 
-        creds = GoogleCredentials(
-            token=access_token,
-            refresh_token=refresh_token,
-            token_uri=token_uri,
-            client_id=client_id,
-            client_secret=client_secret
-        )
         drive_service = google_build("drive", "v3", credentials=creds)
         sheets_service = google_build("sheets", "v4", credentials=creds)
 
