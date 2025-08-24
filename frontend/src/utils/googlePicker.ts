@@ -182,11 +182,15 @@ export const showGoogleDrivePicker = (
     // Set title
     picker.setTitle(options.title || 'Select files from Google Drive');
 
-    // Set size for better UX
+    // Set size for better UX - larger size makes cancel button more visible
     picker.setSize(1051, 650);
 
     // Set origin to current domain
     picker.setOrigin(window.location.origin);
+
+    // Configure picker for better UX
+    // The Google Picker should have a built-in cancel/close button (X) in the top-right corner
+    // Users can also press Escape key to cancel
 
     // Filter by MIME types if specified
     if (options.mimeTypes && options.mimeTypes.length > 0) {

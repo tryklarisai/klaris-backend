@@ -378,15 +378,27 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
   }, [tab, data, driveFiles.length]);
 
   return (
-    <Box sx={{ width: '100%', py: 1 }}>
+    <Box sx={{ width: '100%' }}>
       {loading ? <CircularProgress /> : error ? <Alert severity="error">{error}</Alert> : (
         <Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-            <Tabs value={tab} onChange={(_, v) => setTab(v)}>
-              <Tab label="Overview" />
-              <Tab label={data.type === 'postgres' ? 'Select Tables' : 'Select Files'} />
-              <Tab label="Schema" />
-            </Tabs>
+          {/* Page Header */}
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
+            <Box>
+              <Typography variant="h5" component="h1" sx={{ fontWeight: 600 }}>
+                {data.name || 'Unnamed Connector'}
+              </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Typography variant="body2" color="text.secondary">
+                  {data.type}
+                </Typography>
+                <Chip 
+                  size="small" 
+                  label={data.status} 
+                  color={data.status === 'active' ? 'success' : 'error'}
+                  variant="outlined"
+                />
+              </Box>
+            </Box>
             <Button
               variant="outlined"
               color="error"
@@ -398,28 +410,33 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
               Delete Connector
             </Button>
           </Box>
+          
+          {/* Navigation Tabs */}
+          <Box sx={{ mb: 1 }}>
+            <Tabs value={tab} onChange={(_, v) => setTab(v)}>
+              <Tab label="Overview" />
+              <Tab label={data.type === 'postgres' ? 'Select Tables' : 'Select Files'} />
+              <Tab label="Schema" />
+            </Tabs>
+          </Box>
 
           {tab === 0 && (
             <Box>
               {/* Meta grid */}
               <Box sx={{
                 display: 'grid',
-                gridTemplateColumns: { xs: '1fr', sm: 'repeat(4, minmax(0, 1fr))' },
+                gridTemplateColumns: { xs: '1fr', sm: 'repeat(3, minmax(0, 1fr))' },
                 gap: 1,
                 mb: 1,
               }}>
                 <Box>
-                  <Typography variant="caption" color="text.secondary">ID</Typography>
-                  <Typography variant="body2" sx={{ wordBreak: 'break-all' }}>{data.connector_id}</Typography>
-                </Box>
-                <Box>
-                  <Typography variant="caption" color="text.secondary">Type</Typography>
-                  <Typography variant="body2">{data.type}</Typography>
-                </Box>
-                <Box>
-                  <Typography variant="caption" color="text.secondary">Status</Typography>
+                  <Typography variant="caption" color="text.secondary">Created</Typography>
                   <Typography variant="body2">
-                    <Chip size="small" label={data.status} color={data.status === 'active' ? 'success' : 'error'} />
+                    {data.created_at ? (
+                      <Tooltip title={formatLocalDatetime(data.created_at)}>
+                        <span>{formatLocalDatetime(data.created_at)}</span>
+                      </Tooltip>
+                    ) : 'Unknown'}
                   </Typography>
                 </Box>
                 <Box>
@@ -430,6 +447,12 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                         <span>{formatLocalDatetime(data.last_schema_fetch)}</span>
                       </Tooltip>
                     ) : 'Never'}
+                  </Typography>
+                </Box>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Connector ID</Typography>
+                  <Typography variant="body2" sx={{ wordBreak: 'break-all', fontSize: '0.75rem', color: 'text.secondary' }}>
+                    {data.connector_id}
                   </Typography>
                 </Box>
               </Box>
