@@ -17,6 +17,8 @@ from passlib.context import CryptContext
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/v1/tenants", tags=["Tenants"])
+# Public router (no auth via middleware) for signup-only endpoint
+public_router = APIRouter(prefix="/api/v1", tags=["Tenants"])
 
 # Password hashing context
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -51,6 +53,47 @@ def create_tenant(payload: TenantCreate, db: Session = Depends(get_db)) -> Tenan
     try:
         db.add(tenant)
         db.flush()  # to get tenant.tenant_id
+        root_user.tenant_id = tenant.tenant_id
+        db.add(root_user)
+        db.commit()
+        db.refresh(tenant)
+        db.refresh(root_user)
+    except SQLAlchemyError as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Could not create tenant and root user: " + str(e))
+    return TenantWithRootUserRead(
+        tenant_id=tenant.tenant_id,
+        name=tenant.name,
+        plan=tenant.plan,
+        credit_balance=tenant.credit_balance,
+        settings=tenant.settings,
+        root_user=UserRead.model_validate(root_user),
+    )
+
+
+@public_router.post("/register-new-tenant", response_model=TenantWithRootUserRead, status_code=status.HTTP_201_CREATED)
+def register_new_tenant(payload: TenantCreate, db: Session = Depends(get_db)) -> TenantWithRootUserRead:
+    """Public signup endpoint: create a new tenant with a root user (no auth required)."""
+    if not verify_password_complexity(payload.root_user_password):
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters, include at least one letter, one number, and one symbol.")
+
+    tenant = Tenant(
+        name=payload.name,
+        plan=payload.plan,
+        credit_balance=payload.credit_balance,
+        settings=payload.settings or TENANT_SETTINGS_DEFAULT.copy(),
+    )
+    hashed_pw = pwd_context.hash(payload.root_user_password)
+    root_user = User(
+        tenant_id=None,
+        name=payload.root_user_name,
+        email=payload.root_user_email,
+        hashed_password=hashed_pw,
+        is_root=True,
+    )
+    try:
+        db.add(tenant)
+        db.flush()
         root_user.tenant_id = tenant.tenant_id
         db.add(root_user)
         db.commit()

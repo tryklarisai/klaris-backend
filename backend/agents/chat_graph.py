@@ -19,9 +19,9 @@ from models.schema import Schema
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.chat_history import InMemoryChatMessageHistory
-from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain.callbacks.base import BaseCallbackHandler
 from .tools import make_generic_tools
+from services.chat_llm import stream_chat_with_tools
 from pgvector.sqlalchemy import Vector
 from services.embeddings import get_embeddings_client_for_tenant
 from services.settings import get_tenant_settings, get_setting
@@ -77,36 +77,7 @@ def delete_thread(tenant_id: UUID, thread_id: str) -> bool:
     key = _session_key(tenant_id, thread_id)
     return _THREAD_HISTORIES.pop(key, None) is not None
 
-def _make_llm_for_tenant(db: Session, tenant_id: UUID):
-    settings = get_tenant_settings(db, tenant_id)
-    provider = str(get_setting(settings, "LLM_PROVIDER", "openai")).lower()
-    model = str(get_setting(settings, "LLM_MODEL", "gpt-4o"))
-    temperature = float(get_setting(settings, "LLM_TEMPERATURE", 0.0))
-    try:
-        logger.info("llm_init provider=%s model=%s temperature=%s", provider, model, temperature)
-    except Exception:
-        pass
-    if provider == "openai":
-        from langchain_openai import ChatOpenAI
-        api_key = str(get_setting(settings, "LLM_API_KEY", ""))
-        base_url = str(get_setting(settings, "OPENAI_BASE_URL", "https://api.openai.com/v1"))
-        return ChatOpenAI(
-            model=model,
-            temperature=temperature,
-            streaming=True,
-            api_key=api_key,
-            base_url=base_url,
-            stream_usage=True,
-        )
-    elif provider == "anthropic":
-        from langchain_anthropic import ChatAnthropic
-        api_key = str(get_setting(settings, "LLM_API_KEY", ""))
-        # Anthropic does not currently emit token usage on stream; fallback without usage
-        return ChatAnthropic(model=model, temperature=temperature, streaming=True, api_key=api_key)
-    else:
-        from langchain_openai import ChatOpenAI
-        api_key = str(get_setting(settings, "LLM_API_KEY", ""))
-        return ChatOpenAI(model=model, temperature=temperature, streaming=True, api_key=api_key)
+# _make_llm_for_tenant unused after ChatLLM wrapper adoption
 
 def _build_connectors_summary(connectors: List[Connector]) -> List[Dict[str, Any]]:
     return [{"connector_id": str(c.connector_id), "connector_type": c.type} for c in connectors]
@@ -970,9 +941,6 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
         MessagesPlaceholder("agent_scratchpad"),
     ])
 
-    llm = _make_llm_for_tenant(db, tenant_id)
-    agent = create_openai_tools_agent(llm, tools, prompt)
-    executor = AgentExecutor(agent=agent, tools=tools, verbose=False, max_iterations=6, return_intermediate_steps=False)
     # Configure per-session chat history window from tenant settings
     try:
         settings = get_tenant_settings(db, tenant_id)
@@ -980,12 +948,6 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
     except Exception:
         max_turns_cfg = 20
 
-    runnable = RunnableWithMessageHistory(
-        executor,
-        _history_for_session,
-        input_messages_key="input",
-        history_messages_key="chat_history",
-    )
     # Back-compat: allow passing a MessageHistory object instead of thread_id
     provided_history = None
     if isinstance(thread_id, MessageHistory):
@@ -1059,10 +1021,15 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
     try:
         # Send an initial event to prompt clients to render immediately
         yield "event: ready\ndata: {}\n\n"
-        async for ev in runnable.astream_events(
-            {"input": message, "context": context_json},
-            config={"configurable": {"session_id": session_id}, "callbacks": [usage_cb]},
-            version="v2",
+        async for ev in stream_chat_with_tools(
+            db,
+            str(tenant_id),
+            prompt=prompt,
+            tools=tools,
+            session_id=session_id,
+            history_provider=_history_for_session,
+            input_payload={"input": message, "context": context_json},
+            callbacks=[usage_cb],
         ):
             etype = ev.get("event")
             data = ev.get("data", {}) or {}

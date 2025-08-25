@@ -3,7 +3,7 @@ import os
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from routers.tenants import router as tenant_router
+from routers.tenants import router as tenant_router, public_router as tenant_public_router
 from routers.auth import router as auth_router
 from routers.connectors import router as connector_router, oauth_router
 from routers.relationships import router as relationships_router
@@ -33,6 +33,7 @@ app.add_middleware(
 )
 
 app.include_router(tenant_router)
+app.include_router(tenant_public_router)
 app.include_router(auth_router)
 app.include_router(connector_router)
 app.include_router(oauth_router)  # Mount root-level Google OAuth endpoints
@@ -52,11 +53,19 @@ PUBLIC_PATH_PREFIXES = [
     "/api/v1/connectors/oauth",  # OAuth callbacks/flows
 ]
 
+# Method-specific public endpoints (exact paths)
+PUBLIC_METHOD_PATHS = {
+    ("POST", "/api/v1/register-new-tenant"),
+}
+
 def _is_public_path(path: str) -> bool:
     for p in PUBLIC_PATH_PREFIXES:
         if path.startswith(p):
             return True
     return False
+
+def _is_public_method_path(method: str, path: str) -> bool:
+    return (str(method).upper(), str(path)) in PUBLIC_METHOD_PATHS
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
@@ -65,7 +74,7 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
     path = request.url.path
     # Only guard API routes and allow public paths
-    if path.startswith("/api/") and not _is_public_path(path):
+    if path.startswith("/api/") and not (_is_public_path(path) or _is_public_method_path(request.method, path)):
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.lower().startswith("bearer "):
             return JSONResponse(status_code=401, content={"detail": "Not authenticated"})

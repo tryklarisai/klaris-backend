@@ -85,7 +85,7 @@ export default function RegisterPage() {
     setLoading(true);
 
     try {
-      const res = await axios.post(`${API_URL}/api/v1/tenants/`, {
+      const res = await axios.post(`${API_URL}/api/v1/register-new-tenant`, {
         ...form,
         credit_balance: 0, // hidden; default
         settings: {}, // hidden; default
