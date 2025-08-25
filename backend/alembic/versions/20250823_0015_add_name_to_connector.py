@@ -5,8 +5,8 @@ from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision = '20250820_0011_add_name_to_connector'
-down_revision = '20250814_0010_switch_embedding_to_vector_and_index'
+revision = '20250823_0015_add_name_to_connector'
+down_revision = '20250823_0014_add_module_to_usage_events'
 branch_labels = None
 depends_on = None
 
