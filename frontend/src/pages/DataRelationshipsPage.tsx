@@ -7,6 +7,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import JsonView from 'react18-json-view';
 import 'react18-json-view/src/style.css';
 import { buildApiUrl } from '../config';
+import { formatLocalDatetime } from '../utils/date';
 
 const API_URL = buildApiUrl('');
 
@@ -540,8 +541,7 @@ export default function DataRelationshipsPage() {
   }
 
   return (
-    <Box sx={{ mt: 7 }}>
-      <Typography variant="h4" sx={{ mb: 1 }}>Data Relationships</Typography>
+    <Box>
       {loading ? <CircularProgress /> : error ? <Alert severity="error">{error}</Alert> : (
         <>
           <Accordion defaultExpanded>
@@ -557,9 +557,9 @@ export default function DataRelationshipsPage() {
                       }}
                     />
                     <ListItemText
-                      primary={`${c.type} • ${c.connector_id}`}
+                      primary={c.name || `${c.type} Connector`}
                       secondary={(() => {
-                        const ts = c.last_schema_fetch ? new Date(c.last_schema_fetch).toLocaleString() : 'Never';
+                        const ts = c.last_schema_fetch ? formatLocalDatetime(c.last_schema_fetch) : 'Never';
                         const status = c.status || 'unknown';
                         return `${status} • Last fetched: ${ts}`;
                       })()}

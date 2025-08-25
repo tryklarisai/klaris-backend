@@ -21,6 +21,7 @@ class ConnectorStatus(str, Enum):
 class ConnectorCreateRequest(BaseModel):
     type: ConnectorType
     config: Dict[str, Any]
+    name: Optional[str] = None
 
 class ConnectorCreateResponse(BaseModel):
     connector_id: UUID
@@ -34,6 +35,7 @@ class ConnectorSchemaInfo(BaseModel):
 
 class ConnectorSummary(BaseModel):
     connector_id: UUID
+    name: Optional[str] = None
     type: ConnectorType
     status: ConnectorStatus
     created_at: Optional[str] = None

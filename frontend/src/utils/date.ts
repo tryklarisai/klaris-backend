@@ -37,7 +37,20 @@ export function formatRelativeTime(input: string | number | Date, nowInput?: str
 }
 
 export function formatLocalDatetime(input: string | number | Date): string {
-  const date = new Date(input);
+  // Always display in user's local timezone
+  let date: Date;
+  if (typeof input === 'string' && input.endsWith('Z')) {
+    // ISO string with Z (UTC)
+    date = new Date(input);
+  } else if (typeof input === 'string') {
+    // Try to parse as local time if no Z
+    date = new Date(input + 'Z');
+    if (Number.isNaN(date.getTime())) {
+      date = new Date(input);
+    }
+  } else {
+    date = new Date(input);
+  }
   if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleString(undefined, {
     year: 'numeric',
@@ -46,6 +59,7 @@ export function formatLocalDatetime(input: string | number | Date): string {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
   } as Intl.DateTimeFormatOptions);
 }
 

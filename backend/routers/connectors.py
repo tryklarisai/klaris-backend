@@ -6,7 +6,8 @@ from fastapi import APIRouter, HTTPException, Depends, status, Request, Query
 from sqlalchemy.orm import Session
 from uuid import UUID
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+from sqlalchemy.exc import IntegrityError
 
 from models.connector import Connector, ConnectorStatus
 from models.tenant import Tenant
@@ -25,11 +26,37 @@ from fastapi.responses import RedirectResponse
 import requests
 from uuid import UUID
 
+def check_connector_name_uniqueness(db: Session, tenant_id: str, name: str, exclude_connector_id: str = None) -> None:
+    """
+    Check if connector name is unique within tenant scope.
+    Raises HTTPException if name already exists.
+    
+    Args:
+        db: Database session
+        tenant_id: Tenant ID to check within
+        name: Connector name to check
+        exclude_connector_id: Optional connector ID to exclude from check (for updates)
+    """
+    if not name or not name.strip():
+        return  # Empty/null names are allowed and don't need uniqueness check
+    
+    query = db.query(Connector).filter_by(tenant_id=tenant_id, name=name.strip())
+    if exclude_connector_id:
+        query = query.filter(Connector.connector_id != exclude_connector_id)
+    
+    existing = query.first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, 
+            detail=f"A connector with the name '{name.strip()}' already exists. Please choose a different name."
+        )
+
 def make_json_safe(obj):
     """
-    Recursively convert any UUID or datetime in dict/list to string, so that the structure becomes fully JSON serializable.
+    Recursively convert any UUID, datetime, date, or Decimal in dict/list to string/number, so that the structure becomes fully JSON serializable.
     """
-    from datetime import datetime
+    from datetime import datetime, date
+    from decimal import Decimal
     if isinstance(obj, dict):
         return {k: make_json_safe(v) for k, v in obj.items()}
     elif isinstance(obj, list):
@@ -38,6 +65,10 @@ def make_json_safe(obj):
         return str(obj)
     elif isinstance(obj, datetime):
         return obj.isoformat()
+    elif isinstance(obj, date):
+        return obj.isoformat()
+    elif isinstance(obj, Decimal):
+        return float(obj)
     else:
         return obj
 
@@ -70,6 +101,7 @@ def google_drive_authorize(request: Request):
     client_id = os.getenv("GOOGLE_CLIENT_ID")
     redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI")
     tenant_id = request.query_params.get("tenant_id")
+    connector_name = request.query_params.get("name")
     if not client_id or not redirect_uri:
         raise HTTPException(status_code=500, detail="OAuth env not configured")
     if tenant_id is None:
@@ -77,7 +109,9 @@ def google_drive_authorize(request: Request):
     scope = "https://www.googleapis.com/auth/drive.readonly https://www.googleapis.com/auth/spreadsheets.readonly"
     # Secure random CSRF token (nonce)
     csrf_token = secrets.token_urlsafe(16)
-    state = f"{csrf_token}:{tenant_id}"
+    # Pass connector_name in state if provided (URL-encoded)
+    import urllib.parse
+    state = f"{csrf_token}:{tenant_id}:{urllib.parse.quote(connector_name) if connector_name else ''}"
     params = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
@@ -99,6 +133,7 @@ def google_drive_callback(request: Request, db: Session = Depends(get_db)):
     """
     import requests as pyrequests
     import os
+    import urllib.parse
     from datetime import datetime, timedelta
     from models.connector import ConnectorStatus, Connector
     from schemas.connector import ConnectorType
@@ -113,7 +148,12 @@ def google_drive_callback(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Missing authorization code (OAuth callback)")
     if not state or ":" not in state:
         raise HTTPException(status_code=400, detail="Invalid state param (missing tenant id)")
-    csrf_token, tenant_id = state.split(":", 1)
+    # Accept state as csrf_token:tenant_id:connector_name (connector_name may be empty)
+    parts = state.split(":", 2)
+    if len(parts) < 2:
+        raise HTTPException(status_code=400, detail="Invalid state param")
+    csrf_token, tenant_id = parts[0], parts[1]
+    connector_name = urllib.parse.unquote(parts[2]) if len(parts) > 2 else None
     # TODO: validate CSRF/nonce if tracking sessions
     client_id = os.getenv("GOOGLE_CLIENT_ID")
     client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -157,11 +197,17 @@ def google_drive_callback(request: Request, db: Session = Depends(get_db)):
     expiry = datetime.utcnow() + timedelta(seconds=expires_in) if expires_in else None
     if not access_token or not refresh_token:
         raise HTTPException(status_code=400, detail="Did not receive access/refresh token from Google.")
+    
+    # Check connector name uniqueness
+    if connector_name:
+        check_connector_name_uniqueness(db, tenant_id, connector_name)
+    
     # Store a new Connector in DB (status=ACTIVE)
     now = datetime.utcnow()
     connector = Connector(
         connector_id=uuid4(),
         tenant_id=tenant_id,
+        name=connector_name.strip() if connector_name else None,
         type=ConnectorType.GOOGLE_DRIVE.value,
         config={
             # Don't persist access_token beyond expiry; refresh_token is for renewals
@@ -175,11 +221,21 @@ def google_drive_callback(request: Request, db: Session = Depends(get_db)):
         last_schema_fetch=None # will be fetched in MCP step
     )
     db.add(connector)
-    db.commit()
-    # Redirect back to the Connectors list page on the frontend.
+    
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if 'uq_connector_name_per_tenant' in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A connector with the name '{connector_name}' already exists. Please choose a different name."
+            )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Database constraint violation")
+    # Redirect to the connector detail page for file selection and naming
     # FRONTEND_URL is expected to be just the host (e.g., https://demo.tryklaris.ai)
     base = os.getenv("FRONTEND_URL", "http://localhost:3000")
-    redirect_url = f"{base.rstrip('/')}/connectors?gdrive=success"
+    redirect_url = f"{base.rstrip('/')}/connectors/{connector.connector_id}?setup=true"
     return RedirectResponse(redirect_url)
 
 # Original connectors CRUD API
@@ -332,9 +388,13 @@ def create_connector(
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
 
+    # Check connector name uniqueness
+    check_connector_name_uniqueness(db, str(tenant_id), request.name)
+
     now = datetime.utcnow()
     connector = Connector(
         tenant_id=str(tenant_id),
+        name=request.name.strip() if request.name else None,
         type=request.type.value,
         config=request.config,
         status=ConnectorStatus.FAILED,  # pessimistic by default
@@ -344,8 +404,44 @@ def create_connector(
     db.add(connector)
     db.flush()  # get generated connector_id (UUID)
 
-    # Skip MCP connection and schema fetch
-    db.commit()
+    # Test connection for Postgres connectors
+    if connector.type == "postgres":
+        try:
+            # Test connection using psycopg2 directly
+            import psycopg2
+            conn_config = connector.config
+            conn = psycopg2.connect(
+                host=conn_config.get('host'),
+                port=conn_config.get('port', 5432),
+                user=conn_config.get('user'),
+                password=conn_config.get('password'),
+                database=conn_config.get('database'),
+                connect_timeout=10
+            )
+            # Test with a simple query
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            connector.status = ConnectorStatus.ACTIVE
+            connector.error_message = None
+        except Exception as e:
+            connector.status = ConnectorStatus.FAILED
+            connector.error_message = f"Connection failed: {str(e)}"
+    
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if 'uq_connector_name_per_tenant' in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A connector with the name '{request.name}' already exists. Please choose a different name."
+            )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Database constraint violation")
+    
     return ConnectorCreateResponse(
         connector_id=connector.connector_id,
         status=connector.status.value,
@@ -374,6 +470,7 @@ def list_connectors(
             }
         result.append(ConnectorSummary(
             connector_id=conn.connector_id,
+            name=conn.name,
             type=conn.type,
             status=conn.status.value,
             created_at=conn.created_at.isoformat() if getattr(conn, 'created_at', None) else None,
@@ -514,14 +611,31 @@ def update_connector(
     connector = db.query(Connector).filter_by(tenant_id=tenant_id, connector_id=connector_id).first()
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
+    
+    # Check name uniqueness if name is being updated
+    if hasattr(request, 'name') and request.name and request.name != connector.name:
+        check_connector_name_uniqueness(db, tenant_id, request.name, connector_id)
+    
     connector.type = request.type.value
     # Merge old config with new keys (for partial update flexibility)
     old_config = dict(connector.config or {})
     next_config = dict(request.config or {})
     old_config.update(next_config)  # Partial update: merge new keys/values into existing
     connector.config = old_config
+    if hasattr(request, 'name') and request.name:
+        connector.name = request.name.strip()
     connector.updated_at = datetime.utcnow()
-    db.commit()
+    
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if 'uq_connector_name_per_tenant' in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A connector with the name '{request.name}' already exists. Please choose a different name."
+            )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Database constraint violation")
     last_schema = db.query(Schema).filter_by(
         connector_id=connector.connector_id
     ).order_by(Schema.fetched_at.desc()).first()
@@ -534,6 +648,7 @@ def update_connector(
         }
     return ConnectorSummary(
         connector_id=connector.connector_id,
+        name=connector.name,
         type=connector.type,
         status=connector.status.value,
         created_at=connector.created_at.isoformat() if getattr(connector, 'created_at', None) else None,
@@ -572,16 +687,34 @@ def patch_connector(
     connector = db.query(Connector).filter_by(tenant_id=tenant_id, connector_id=connector_id).first()
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
-    allowed_fields = ["connector_metadata", "config", "status", "type"]
+    
+    # Check name uniqueness if name is being updated
+    if 'name' in patch_data and patch_data['name'] and patch_data['name'] != connector.name:
+        check_connector_name_uniqueness(db, tenant_id, patch_data['name'], connector_id)
+    
+    allowed_fields = ["connector_metadata", "config", "status", "type", "name"]
     made_update = False
     for key in allowed_fields:
         if key in patch_data and patch_data[key] is not None:
-            setattr(connector, key, patch_data[key])
+            if key == 'name':
+                setattr(connector, key, patch_data[key].strip())
+            else:
+                setattr(connector, key, patch_data[key])
             made_update = True
     if not made_update:
         raise HTTPException(status_code=400, detail="No updatable fields present in patch body.")
     connector.updated_at = datetime.utcnow()
-    db.commit()
+    
+    try:
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        if 'uq_connector_name_per_tenant' in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A connector with the name '{patch_data.get('name', '')}' already exists. Please choose a different name."
+            )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Database constraint violation")
     last_schema = db.query(Schema).filter_by(
         connector_id=connector.connector_id
     ).order_by(Schema.fetched_at.desc()).first()
@@ -594,6 +727,7 @@ def patch_connector(
         }
     return ConnectorSummary(
         connector_id=connector.connector_id,
+        name=connector.name,
         type=connector.type,
         status=connector.status.value,
         created_at=connector.created_at.isoformat() if getattr(connector, 'created_at', None) else None,
@@ -660,3 +794,156 @@ def get_schema_for_connector(
     if not schema:
         raise HTTPException(status_code=404, detail="Schema not found for this connector")
     return SchemaRead.model_validate(schema)
+
+
+@router.delete(
+    "/{connector_id}",
+    summary="Delete a connector and all associated schemas",
+    tags=["Connectors"],
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        204: {"description": "Connector successfully deleted."},
+        404: {"description": "Connector not found."},
+        403: {"description": "Forbidden tenant."}
+    },
+)
+def delete_connector(
+    tenant_id: str,
+    connector_id: str,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    """
+    Delete a connector and all associated schemas.
+    This operation is irreversible.
+    """
+    check_auth_and_tenant(credentials, tenant_id)
+    connector = db.query(Connector).filter_by(tenant_id=tenant_id, connector_id=connector_id).first()
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    
+    # Delete the connector (schemas will be deleted via cascade)
+    db.delete(connector)
+    db.commit()
+    return None
+
+
+@router.post(
+    "/{connector_id}/refresh-token",
+    summary="Refresh OAuth token for Google Drive connector",
+    tags=["Connectors"],
+    response_model=ConnectorSummary,
+    responses={
+        200: {"description": "Token refreshed successfully"},
+        404: {"description": "Connector not found"},
+        400: {"description": "Token refresh failed or not a Google Drive connector"}
+    },
+)
+def refresh_connector_token(
+    tenant_id: str,
+    connector_id: str,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    """
+    Refresh OAuth token for a Google Drive connector
+    """
+    from utils.oauth_utils import refresh_google_oauth_token
+    
+    check_auth_and_tenant(credentials, tenant_id)
+    connector = db.query(Connector).filter_by(tenant_id=tenant_id, connector_id=connector_id).first()
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    
+    if connector.type != "gdrive":
+        raise HTTPException(status_code=400, detail="Token refresh only supported for Google Drive connectors")
+    
+    refresh_token = connector.config.get("oauth_refresh_token")
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="No refresh token available")
+    
+    access_token, new_refresh_token, expiry = refresh_google_oauth_token(refresh_token)
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Failed to refresh token")
+    
+    # Update connector config with new token
+    config = connector.config.copy()
+    config["oauth_access_token"] = access_token
+    if new_refresh_token and new_refresh_token != refresh_token:
+        config["oauth_refresh_token"] = new_refresh_token
+    if expiry:
+        config["token_expiry"] = expiry.isoformat()
+    
+    connector.config = config
+    connector.updated_at = datetime.utcnow()
+    db.commit()
+    
+    # Return updated connector
+    last_schema = db.query(Schema).filter_by(
+        connector_id=connector.connector_id
+    ).order_by(Schema.fetched_at.desc()).first()
+    schema_info = None
+    if last_schema:
+        schema_info = {
+            "schema_id": last_schema.schema_id,
+            "fetched_at": last_schema.fetched_at.isoformat(),
+            "raw_schema": last_schema.raw_schema,
+        }
+    
+    return ConnectorSummary(
+        connector_id=connector.connector_id,
+        name=connector.name,
+        type=connector.type,
+        status=connector.status.value,
+        created_at=connector.created_at.isoformat() if getattr(connector, 'created_at', None) else None,
+        last_schema_fetch=connector.last_schema_fetch.isoformat() if connector.last_schema_fetch else None,
+        error_message=connector.error_message,
+        schema=schema_info,
+        config=connector.config,
+        connector_metadata=connector.connector_metadata,
+    )
+
+
+@router.get(
+    "/{connector_id}/access-token",
+    summary="Get fresh OAuth access token for Google Drive connector",
+    tags=["Connectors"],
+    responses={
+        200: {"description": "Fresh access token returned"},
+        404: {"description": "Connector not found"},
+        400: {"description": "Token refresh failed or not a Google Drive connector"}
+    },
+)
+def get_fresh_access_token(
+    tenant_id: str,
+    connector_id: str,
+    db: Session = Depends(get_db),
+    credentials: HTTPAuthorizationCredentials = Depends(HTTPBearer()),
+):
+    """
+    Get a fresh OAuth access token for a Google Drive connector, refreshing if necessary
+    """
+    from utils.oauth_utils import get_valid_google_credentials
+    
+    check_auth_and_tenant(credentials, tenant_id)
+    connector = db.query(Connector).filter_by(tenant_id=tenant_id, connector_id=connector_id).first()
+    if not connector:
+        raise HTTPException(status_code=404, detail="Connector not found")
+    
+    if connector.type not in ("gdrive", "google_drive"):
+        raise HTTPException(status_code=400, detail="Access token only available for Google Drive connectors")
+    
+    if not connector.config:
+        raise HTTPException(status_code=400, detail="Connector has no configuration")
+    
+    creds, updated_config = get_valid_google_credentials(connector.config)
+    if not creds:
+        raise HTTPException(status_code=400, detail="Failed to get valid credentials")
+    
+    # Update connector config if tokens were refreshed
+    if updated_config != connector.config:
+        connector.config = updated_config
+        connector.updated_at = datetime.utcnow()
+        db.commit()
+    
+    return {"access_token": creds.token}

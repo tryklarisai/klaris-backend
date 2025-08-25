@@ -15,23 +15,14 @@ from google.oauth2.credentials import Credentials as GoogleCredentials
 from googleapiclient.discovery import build as google_build
 from langchain_core.tools import StructuredTool
 from googleapiclient.errors import HttpError
+from utils.oauth_utils import get_valid_google_credentials
 
 
 def _build_creds_from_config(conn_cfg: Dict[str, Any]) -> GoogleCredentials:
-    access_token = conn_cfg.get("oauth_access_token")
-    refresh_token = conn_cfg.get("oauth_refresh_token")
-    token_uri = "https://oauth2.googleapis.com/token"
-    client_id = os.getenv("GOOGLE_CLIENT_ID")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
-    if not all([access_token, refresh_token, client_id, client_secret]):
-        raise RuntimeError("Missing Google Drive credentials/config for Sheets tool")
-    return GoogleCredentials(
-        token=access_token,
-        refresh_token=refresh_token,
-        token_uri=token_uri,
-        client_id=client_id,
-        client_secret=client_secret,
-    )
+    creds, updated_config = get_valid_google_credentials(conn_cfg)
+    if not creds:
+        raise RuntimeError("Missing Google Drive credentials/config for Sheets tool or failed to refresh token")
+    return creds
 
 
 def make_gsheets_tool_runner(conn_cfg: Dict[str, Any]):

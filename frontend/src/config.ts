@@ -6,6 +6,7 @@ export interface AppConfig {
   brandName: string;
   primaryColor: string;
   logoUrl?: string;
+  googleApiKey?: string;
 }
 
 declare global {
@@ -36,6 +37,10 @@ export const config: AppConfig = {
   logoUrl:
     (typeof window !== 'undefined' && window.__APP_CONFIG__?.logoUrl) ||
     readEnv('REACT_APP_LOGO_URL') ||
+    undefined,
+  googleApiKey:
+    (typeof window !== 'undefined' && window.__APP_CONFIG__?.googleApiKey) ||
+    readEnv('REACT_APP_GOOGLE_API_KEY') ||
     undefined,
 };
 

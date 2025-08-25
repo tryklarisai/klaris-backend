@@ -1,14 +1,18 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Box, Button, Typography, Alert, CircularProgress, Chip, Dialog, DialogTitle, DialogContent, DialogActions, List, ListItem, ListItemIcon, ListItemText, Checkbox, Stack, Tabs, Tab, Tooltip, TextField, MenuItem,
-  Table, TableHead, TableRow, TableCell, TableBody
+  Table, TableHead, TableRow, TableCell, TableBody, IconButton
 } from '@mui/material';
+import DeleteIcon from '@mui/icons-material/Delete';
 import JsonView from 'react18-json-view';
 import 'react18-json-view/src/style.css';
 import { SnackbarContext } from '../ui/SnackbarProvider';
 // Alignments only; no Grid needed here
-import { buildApiUrl } from '../config';
+import { buildApiUrl, config } from '../config';
+import GoogleDrivePicker, { GoogleDriveFile } from '../components/GoogleDrivePicker';
+import { GOOGLE_DRIVE_MIME_TYPES } from '../utils/googlePicker';
+import { formatLocalDatetime } from '../utils/date';
 
 const API_URL = buildApiUrl('');
 
@@ -20,15 +24,12 @@ function redactConfig(config: any) {
   return redacted;
 }
 
-interface GoogleDriveFile {
-  id: string;
-  name: string;
-  mimeType: string;
-}
 
 export default function ConnectorDetailPage() {
   const { connectorId } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const isSetupMode = searchParams.get('setup') === 'true';
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -55,6 +56,81 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
   const [schemaModalOpen, setSchemaModalOpen] = useState(false);
   const [collapsed, setCollapsed] = useState<boolean | number>(2);
   const { notify } = React.useContext(SnackbarContext);
+  
+  // Setup flow states
+  const [connectorName, setConnectorName] = useState('');
+  const [namingStep, setNamingStep] = useState(false);
+  const [autoFileSelection, setAutoFileSelection] = useState(false);
+  const [autoSchemaFetch, setAutoSchemaFetch] = useState(false);
+
+  // Delete states
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  // Fresh token state
+  const [freshAccessToken, setFreshAccessToken] = useState<string | null>(null);
+
+  // Function to check if token is expired
+  const isTokenExpired = (tokenExpiryStr?: string): boolean => {
+    if (!tokenExpiryStr) return true;
+    
+    try {
+      const tokenExpiry = new Date(tokenExpiryStr);
+      const now = new Date();
+      // Consider token expired if it expires within 5 minutes (300 seconds)
+      const fiveMinutesFromNow = new Date(now.getTime() + 5 * 60 * 1000);
+      return tokenExpiry <= fiveMinutesFromNow;
+    } catch (error) {
+      console.warn('Error parsing token expiry:', error);
+      return true; // Consider expired if can't parse
+    }
+  };
+
+  // Function to get fresh access token (only refreshes if expired)
+  const getFreshAccessToken = async (): Promise<string | null> => {
+    const currentAccessToken = data?.config?.oauth_access_token;
+    const tokenExpiry = data?.config?.token_expiry;
+    const refreshToken = data?.config?.oauth_refresh_token;
+
+    if (!refreshToken) {
+      return currentAccessToken || null;
+    }
+
+    // Check if token is expired first
+    if (!isTokenExpired(tokenExpiry)) {
+      console.log('Token is still valid, using existing token');
+      return currentAccessToken || null;
+    }
+
+    console.log('Token is expired, refreshing...');
+
+    if (!tenantId || !connectorId) {
+      return currentAccessToken || null;
+    }
+
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      const response = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}/access-token`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        console.log('Successfully refreshed access token');
+        // Update the connector data to reflect the new token
+        await fetchDetail();
+        return result.access_token;
+      } else {
+        console.warn('Could not refresh access token, using existing token');
+        return currentAccessToken || null;
+      }
+    } catch (err) {
+      console.warn('Error fetching fresh access token:', err);
+      return currentAccessToken || null;
+    }
+  };
 
   useEffect(() => {
     const tStr = window.localStorage.getItem('klaris_tenant');
@@ -70,6 +146,13 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
     if (tenantId && connectorId) fetchDetail();
     // eslint-disable-next-line
   }, [tenantId, connectorId]);
+
+  // Setup flow: automatically start naming step for new Google Drive connectors
+  useEffect(() => {
+    if (isSetupMode && data && data.type === 'google_drive' && !data.name) {
+      setNamingStep(true);
+    }
+  }, [isSetupMode, data]);
 
   // Auto-load full schema when switching to Schema tab
   useEffect(() => {
@@ -167,11 +250,65 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
       setSchema(pretty);
       setData((d: any) => ({ ...(d || {}), schema: pretty, last_schema_fetch: result.fetched_at }));
       setSchemaMessage('Schema fetched successfully');
+      setAutoSchemaFetch(false); // Reset auto-fetch flag
       fetchDetail(); // update display
     } catch (err: any) {
       setSchemaMessage(err.message || 'Failed to fetch schema');
+      setAutoSchemaFetch(false);
     } finally {
       setFetchingSchema(false);
+    }
+  };
+
+  const handleSaveName = async () => {
+    if (!tenantId || !connectorId || !connectorName.trim()) return;
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: connectorName.trim() }),
+      });
+      if (!resp.ok) throw new Error('Failed to save connector name');
+      await fetchDetail();
+      setNamingStep(false);
+      // Auto-open file selection for Google Drive
+      if (data?.type === 'google_drive') {
+        setAutoFileSelection(true);
+        setSelectModalOpen('drive');
+        setFilesLoading(true);
+        setFilesError(null);
+        fetchDriveFiles();
+      }
+    } catch (err: any) {
+      notify(err.message || 'Failed to save name', 'error');
+    }
+  };
+
+  const handleDeleteConnector = async () => {
+    if (!tenantId || !connectorId) return;
+    setDeleting(true);
+    try {
+      const token = window.localStorage.getItem('klaris_jwt');
+      const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!resp.ok) {
+        const errorData = await resp.json();
+        throw new Error(errorData?.error || 'Failed to delete connector');
+      }
+      // Navigate back to connectors list
+      navigate('/connectors');
+      notify('Connector deleted successfully', 'success');
+    } catch (err: any) {
+      notify(err.message || 'Failed to delete connector', 'error');
+    } finally {
+      setDeleting(false);
+      setDeleteDialogOpen(false);
     }
   };
 
@@ -241,44 +378,81 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
   }, [tab, data, driveFiles.length]);
 
   return (
-    <Box sx={{ width: '100%', py: 1 }}>
+    <Box sx={{ width: '100%' }}>
       {loading ? <CircularProgress /> : error ? <Alert severity="error">{error}</Alert> : (
         <Box>
-          <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 1 }}>
-            <Tab label="Overview" />
-            <Tab label={data.type === 'postgres' ? 'Select Tables' : 'Select Files'} />
-            <Tab label="Schema" />
-          </Tabs>
+          {/* Page Header */}
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
+            <Box>
+              <Typography variant="h5" component="h1" sx={{ fontWeight: 600 }}>
+                {data.name || 'Unnamed Connector'}
+              </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                <Typography variant="body2" color="text.secondary">
+                  {data.type}
+                </Typography>
+                <Chip 
+                  size="small" 
+                  label={data.status} 
+                  color={data.status === 'active' ? 'success' : 'error'}
+                  variant="outlined"
+                />
+              </Box>
+            </Box>
+            <Button
+              variant="outlined"
+              color="error"
+              size="small"
+              startIcon={<DeleteIcon />}
+              onClick={() => setDeleteDialogOpen(true)}
+              disabled={deleting}
+            >
+              Delete Connector
+            </Button>
+          </Box>
+          
+          {/* Navigation Tabs */}
+          <Box sx={{ mb: 1 }}>
+            <Tabs value={tab} onChange={(_, v) => setTab(v)}>
+              <Tab label="Overview" />
+              <Tab label={data.type === 'postgres' ? 'Select Tables' : 'Select Files'} />
+              <Tab label="Schema" />
+            </Tabs>
+          </Box>
 
           {tab === 0 && (
             <Box>
               {/* Meta grid */}
               <Box sx={{
                 display: 'grid',
-                gridTemplateColumns: { xs: '1fr', sm: 'repeat(4, minmax(0, 1fr))' },
+                gridTemplateColumns: { xs: '1fr', sm: 'repeat(3, minmax(0, 1fr))' },
                 gap: 1,
                 mb: 1,
               }}>
                 <Box>
-                  <Typography variant="caption" color="text.secondary">ID</Typography>
-                  <Typography variant="body2" sx={{ wordBreak: 'break-all' }}>{data.connector_id}</Typography>
-                </Box>
-                <Box>
-                  <Typography variant="caption" color="text.secondary">Type</Typography>
-                  <Typography variant="body2">{data.type}</Typography>
-                </Box>
-                <Box>
-                  <Typography variant="caption" color="text.secondary">Status</Typography>
-                  <Chip size="small" label={data.status} color={data.status === 'active' ? 'success' : 'error'} />
+                  <Typography variant="caption" color="text.secondary">Created</Typography>
+                  <Typography variant="body2">
+                    {data.created_at ? (
+                      <Tooltip title={formatLocalDatetime(data.created_at)}>
+                        <span>{formatLocalDatetime(data.created_at)}</span>
+                      </Tooltip>
+                    ) : 'Unknown'}
+                  </Typography>
                 </Box>
                 <Box>
                   <Typography variant="caption" color="text.secondary">Last Schema Fetch</Typography>
                   <Typography variant="body2">
                     {data.last_schema_fetch ? (
-                      <Tooltip title={new Date(data.last_schema_fetch).toLocaleString()}>
-                        <span>{new Date(data.last_schema_fetch).toLocaleString()}</span>
+                      <Tooltip title={formatLocalDatetime(data.last_schema_fetch)}>
+                        <span>{formatLocalDatetime(data.last_schema_fetch)}</span>
                       </Tooltip>
                     ) : 'Never'}
+                  </Typography>
+                </Box>
+                <Box>
+                  <Typography variant="caption" color="text.secondary">Connector ID</Typography>
+                  <Typography variant="body2" sx={{ wordBreak: 'break-all', fontSize: '0.75rem', color: 'text.secondary' }}>
+                    {data.connector_id}
                   </Typography>
                 </Box>
               </Box>
@@ -307,7 +481,7 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                     {fetchingSchema ? 'Refreshing…' : 'Refresh Schema'}
                   </Button>
                   <Typography variant="body2" color="text.secondary">
-                    Last fetched: {data.last_schema_fetch ? new Date(data.last_schema_fetch).toLocaleString() : 'Never'}
+                    Last fetched: {data.last_schema_fetch ? formatLocalDatetime(data.last_schema_fetch) : 'Never'}
                   </Typography>
                   <Box sx={{ flex: 1 }} />
                   <TextField
@@ -377,19 +551,196 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
               {data.type === 'google_drive' && (
                 <>
                   <Stack direction="row" gap={1} alignItems="center">
-                    <Button
-                      variant="outlined"
-                      onClick={() => {
-                        setSelectModalOpen('drive');
-                        setFilesLoading(true);
-                        setFilesError(null);
-                        fetchDriveFiles();
-                      }}
-                    >
-                      {data?.connector_metadata?.selected_drive_file_ids?.length
-                        ? 'Edit Selection'
-                        : 'Select Google Drive Files/Folders'}
-                    </Button>
+                    {config.googleApiKey && data?.config?.oauth_refresh_token ? (
+                      <Button
+                        variant="outlined"
+                        title="Opens Google Drive file picker. You can close it by clicking the X button or pressing Escape key."
+                        onClick={async () => {
+                          try {
+                            // Get fresh token first
+                            const freshToken = await getFreshAccessToken();
+                            if (!freshToken) {
+                              notify('Unable to get valid access token', 'error');
+                              return;
+                            }
+
+                            // Now show the picker with the fresh token
+                            const { showGoogleDrivePicker, GOOGLE_DRIVE_MIME_TYPES } = await import('../utils/googlePicker');
+                            
+                            if (!config.googleApiKey) {
+                              notify('Google API key is not configured', 'error');
+                              return;
+                            }
+                            
+                            await showGoogleDrivePicker(
+                              freshToken,
+                              config.googleApiKey,
+                              async (documents) => {
+                                setSavingSelection(true);
+                                try {
+                                  const token = window.localStorage.getItem('klaris_jwt');
+                                  const newFileIds = documents.map(doc => doc.id);
+                                  
+                                  // Get existing selected files and append new ones
+                                  const existingFileIds = data?.connector_metadata?.selected_drive_file_ids || [];
+                                  const combinedArray = [...existingFileIds, ...newFileIds];
+                                  const combinedFileIds = Array.from(new Set(combinedArray)); // Remove duplicates
+                                  
+                                  const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
+                                    method: 'PATCH',
+                                    headers: {
+                                      'Authorization': `Bearer ${token}`,
+                                      'Content-Type': 'application/json',
+                                    },
+                                    body: JSON.stringify({
+                                      connector_metadata: { selected_drive_file_ids: combinedFileIds }
+                                    }),
+                                  });
+                                  if (!resp.ok) throw new Error('Failed to save selection');
+                                  await fetchDetail();
+                                  notify(`${newFileIds.length} files added successfully`, 'success');
+                                  
+                                  // Auto-proceed to schema discovery if in setup flow
+                                  if (autoFileSelection && combinedFileIds.length > 0) {
+                                    setAutoFileSelection(false);
+                                    setAutoSchemaFetch(true);
+                                    setTimeout(() => {
+                                      handleFetchSchema();
+                                    }, 500);
+                                  }
+                                } catch (err: any) {
+                                  notify(err.message || 'Failed to save selection', 'error');
+                                } finally {
+                                  setSavingSelection(false);
+                                }
+                              },
+                              () => {
+                                console.log('Google Drive Picker cancelled');
+                                notify('File selection cancelled', 'info');
+                              },
+                              {
+                                title: 'Select files from Google Drive',
+                                multiselect: true,
+                                includeFolders: true,
+                                mimeTypes: GOOGLE_DRIVE_MIME_TYPES.ALL_DOCUMENTS
+                              }
+                            );
+                          } catch (error: any) {
+                            notify(error.message || 'Failed to open Google Drive Picker', 'error');
+                          }
+                        }}
+                        disabled={savingSelection}
+                      >
+                        {data?.connector_metadata?.selected_drive_file_ids?.length
+                          ? `Add More Files (${data.connector_metadata.selected_drive_file_ids.length} selected)`
+                          : 'Select Google Drive Files'}
+                      </Button>
+                    ) : config.googleApiKey && data?.config?.oauth_access_token ? (
+                      <Button
+                        variant="outlined"
+                        title="Opens Google Drive file picker. You can close it by clicking the X button or pressing Escape key."
+                        onClick={async () => {
+                          try {
+                            // Try to get fresh token first (this will use existing token if not expired)
+                            let tokenToUse = data.config.oauth_access_token;
+                            
+                            // If we have a refresh token, try to get a fresh token
+                            if (data?.config?.oauth_refresh_token) {
+                              try {
+                                const freshToken = await getFreshAccessToken();
+                                if (freshToken) {
+                                  tokenToUse = freshToken;
+                                }
+                              } catch (err) {
+                                console.warn('Could not refresh token, using existing token');
+                              }
+                            }
+
+                            if (!config.googleApiKey) {
+                              notify('Google API key is not configured', 'error');
+                              return;
+                            }
+
+                            // Now show the picker with the token
+                            const { showGoogleDrivePicker, GOOGLE_DRIVE_MIME_TYPES } = await import('../utils/googlePicker');
+                            await showGoogleDrivePicker(
+                              tokenToUse,
+                              config.googleApiKey,
+                              async (documents) => {
+                                setSavingSelection(true);
+                                try {
+                                  const token = window.localStorage.getItem('klaris_jwt');
+                                  const newFileIds = documents.map(doc => doc.id);
+                                  
+                                  // Get existing selected files and append new ones
+                                  const existingFileIds = data?.connector_metadata?.selected_drive_file_ids || [];
+                                  const combinedArray = [...existingFileIds, ...newFileIds];
+                                  const combinedFileIds = Array.from(new Set(combinedArray)); // Remove duplicates
+                                  
+                                  const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
+                                    method: 'PATCH',
+                                    headers: {
+                                      'Authorization': `Bearer ${token}`,
+                                      'Content-Type': 'application/json',
+                                    },
+                                    body: JSON.stringify({
+                                      connector_metadata: { selected_drive_file_ids: combinedFileIds }
+                                    }),
+                                  });
+                                  if (!resp.ok) throw new Error('Failed to save selection');
+                                  await fetchDetail();
+                                  notify(`${newFileIds.length} files added successfully`, 'success');
+                                  
+                                  // Auto-proceed to schema discovery if in setup flow
+                                  if (autoFileSelection && combinedFileIds.length > 0) {
+                                    setAutoFileSelection(false);
+                                    setAutoSchemaFetch(true);
+                                    setTimeout(() => {
+                                      handleFetchSchema();
+                                    }, 500);
+                                  }
+                                } catch (err: any) {
+                                  notify(err.message || 'Failed to save selection', 'error');
+                                } finally {
+                                  setSavingSelection(false);
+                                }
+                              },
+                              () => {
+                                console.log('Google Drive Picker cancelled');
+                                notify('File selection cancelled', 'info');
+                              },
+                              {
+                                title: 'Select files from Google Drive',
+                                multiselect: true,
+                                includeFolders: true,
+                                mimeTypes: GOOGLE_DRIVE_MIME_TYPES.ALL_DOCUMENTS
+                              }
+                            );
+                          } catch (error: any) {
+                            notify(error.message || 'Failed to open Google Drive Picker', 'error');
+                          }
+                        }}
+                        disabled={savingSelection}
+                      >
+                        {data?.connector_metadata?.selected_drive_file_ids?.length
+                          ? `Add More Files (${data.connector_metadata.selected_drive_file_ids.length} selected)`
+                          : 'Select Google Drive Files'}
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="outlined"
+                        onClick={() => {
+                          setSelectModalOpen('drive');
+                          setFilesLoading(true);
+                          setFilesError(null);
+                          fetchDriveFiles();
+                        }}
+                      >
+                        {data?.connector_metadata?.selected_drive_file_ids?.length
+                          ? 'Edit Selection'
+                          : 'Select Google Drive Files/Folders'}
+                      </Button>
+                    )}
                     {data?.connector_metadata?.selected_drive_file_ids?.length > 0 && (
                       <Chip label={`${data.connector_metadata.selected_drive_file_ids.length} items`} color="info" size="small" />
                     )}
@@ -404,6 +755,7 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                           <TableRow>
                             <TableCell>Name</TableCell>
                             <TableCell>Type</TableCell>
+                            <TableCell width="60">Action</TableCell>
                           </TableRow>
                         </TableHead>
                         <TableBody>
@@ -411,6 +763,40 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                             <TableRow key={f.id}>
                               <TableCell>{f.name}</TableCell>
                               <TableCell>{f.mimeType}</TableCell>
+                              <TableCell>
+                                <IconButton 
+                                  size="small" 
+                                  color="error"
+                                  onClick={async () => {
+                                    try {
+                                      // Remove this file from the selection
+                                      const currentFileIds = data?.connector_metadata?.selected_drive_file_ids || [];
+                                      const updatedFileIds = currentFileIds.filter((id: string) => id !== f.id);
+                                      
+                                      const token = window.localStorage.getItem('klaris_jwt');
+                                      const resp = await fetch(`${API_URL}/tenants/${tenantId}/connectors/${connectorId}`, {
+                                        method: 'PATCH',
+                                        headers: {
+                                          'Authorization': `Bearer ${token}`,
+                                          'Content-Type': 'application/json',
+                                        },
+                                        body: JSON.stringify({
+                                          connector_metadata: { selected_drive_file_ids: updatedFileIds }
+                                        }),
+                                      });
+                                      
+                                      if (!resp.ok) throw new Error('Failed to remove file');
+                                      await fetchDetail();
+                                      notify('File removed successfully', 'success');
+                                    } catch (err: any) {
+                                      notify(err.message || 'Failed to remove file', 'error');
+                                    }
+                                  }}
+                                  title="Remove file"
+                                >
+                                  <DeleteIcon fontSize="small" />
+                                </IconButton>
+                              </TableCell>
                             </TableRow>
                           ))}
                         </TableBody>
@@ -468,13 +854,20 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
               </Stack>
             )}
           {(retestMessage) && <Alert severity={retestMessage.includes('success') ? 'success' : 'error'} sx={{ mt: 2 }}>{retestMessage}</Alert>}
+      {autoSchemaFetch && (
+        <Alert severity="info" sx={{ mt: 2 }}>
+          <Typography variant="body2">
+            Setting up your connector... Automatically fetching schema from selected files.
+          </Typography>
+        </Alert>
+      )}
         </Box>
       )}
       {/* Schema modal removed in favor of inline view */}
       {/* Google Drive File/Folder Picker Modal */}
       <Dialog open={!!selectModalOpen} onClose={() => setSelectModalOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>
-          {selectModalOpen === 'drive' ? 'Select Google Drive Files/Folders' : 'Select Postgres Tables'}
+          {selectModalOpen === 'drive' ? 'Select Google Drive Files' : 'Select Postgres Tables'}
         </DialogTitle>
         <DialogContent>
           {filesLoading ? (
@@ -490,31 +883,34 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                   .map(selId => driveFiles.find(f => f.id === selId))
                   .filter(Boolean),
                 ...driveFiles.filter(f => !selectedIds.includes(f.id)),
-              ].map((f: any) => f && (
-                <ListItem
-                  key={f.id}
-                  dense
-                  component="button"
-                  onClick={() => {
-                    setSelectedIds(selectedIds.includes(f.id)
-                      ? selectedIds.filter(id => id !== f.id)
-                      : [...selectedIds, f.id]);
-                  }}
-                >
-                  <ListItemIcon>
-                    <Checkbox
-                      edge="start"
-                      checked={selectedIds.includes(f.id)}
-                      tabIndex={-1}
-                      disableRipple
+              ]
+                // Filter out folders for Google Drive selection
+                .filter((f: any) => selectModalOpen !== 'drive' || (f && f.mimeType !== 'application/vnd.google-apps.folder'))
+                .map((f: any) => f && (
+                  <ListItem
+                    key={f.id}
+                    dense
+                    component="button"
+                    onClick={() => {
+                      setSelectedIds(selectedIds.includes(f.id)
+                        ? selectedIds.filter(id => id !== f.id)
+                        : [...selectedIds, f.id]);
+                    }}
+                  >
+                    <ListItemIcon>
+                      <Checkbox
+                        edge="start"
+                        checked={selectedIds.includes(f.id)}
+                        tabIndex={-1}
+                        disableRipple
+                      />
+                    </ListItemIcon>
+                    <ListItemText
+                      primary={f.name}
+                      secondary={selectModalOpen === 'drive' ? f.mimeType : undefined}
                     />
-                  </ListItemIcon>
-                  <ListItemText
-                    primary={f.name}
-                    secondary={selectModalOpen === 'drive' ? f.mimeType : undefined}
-                  />
-                </ListItem>
-              ))}
+                  </ListItem>
+                ))}
             </List>
           )}
         </DialogContent>
@@ -547,6 +943,15 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
                       setSelectedTableRows([...(selectedIds as string[])]);
                     }
                 setSelectModalOpen(false);
+                
+                // Auto-proceed to schema discovery if in setup flow
+                if (autoFileSelection && selectedIds.length > 0) {
+                  setAutoFileSelection(false);
+                  setAutoSchemaFetch(true);
+                  setTimeout(() => {
+                    handleFetchSchema();
+                  }, 500); // Small delay for better UX
+                }
               } catch (err: any) {
                 setFilesError(err.message || 'Failed to save');
               }
@@ -557,6 +962,64 @@ const [schemaMessage, setSchemaMessage] = useState<string | null>(null);
             color="primary"
           >
             {savingSelection ? 'Saving...' : 'Save'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+      
+      {/* Connector Naming Dialog */}
+      <Dialog open={namingStep} maxWidth="sm" fullWidth>
+        <DialogTitle>Name Your Google Drive Connector</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            Give your Google Drive connector a name to help you identify it later.
+          </Typography>
+          <TextField
+            autoFocus
+            label="Connector Name"
+            placeholder="e.g., My Google Drive Documents"
+            fullWidth
+            value={connectorName}
+            onChange={(e) => setConnectorName(e.target.value)}
+            onKeyPress={(e) => {
+              if (e.key === 'Enter' && connectorName.trim()) {
+                handleSaveName();
+              }
+            }}
+            margin="normal"
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setNamingStep(false)}>Skip</Button>
+          <Button 
+            onClick={handleSaveName}
+            variant="contained"
+            disabled={!connectorName.trim()}
+          >
+            Continue
+          </Button>
+        </DialogActions>
+      </Dialog>
+      
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteDialogOpen} onClose={() => !deleting && setDeleteDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Delete Connector</DialogTitle>
+        <DialogContent>
+          <Typography variant="body1" sx={{ mb: 2 }}>
+            Are you sure you want to delete the connector "{data?.name || `${data?.type} Connector`}"?
+          </Typography>
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            This action cannot be undone. All schemas and configuration data for this connector will be permanently deleted.
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteDialogOpen(false)} disabled={deleting}>Cancel</Button>
+          <Button 
+            onClick={handleDeleteConnector}
+            variant="contained"
+            color="error"
+            disabled={deleting}
+          >
+            {deleting ? 'Deleting...' : 'Delete'}
           </Button>
         </DialogActions>
       </Dialog>
