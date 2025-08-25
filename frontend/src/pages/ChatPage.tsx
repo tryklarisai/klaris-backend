@@ -17,6 +17,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { keyframes } from '@mui/system';
 import ChartRenderer from '../components/ChartRenderer';
+import AttachedFilesContext from '../components/AttachedFilesContext';
 import html2pdf from 'html2pdf.js';
 import ThumbUpOffAlt from '@mui/icons-material/ThumbUpOffAlt';
 import ThumbDownOffAlt from '@mui/icons-material/ThumbDownOffAlt';
@@ -520,6 +521,9 @@ export default function ChatPage() {
                     />
                   ))}
                 </Stack>
+
+                {/* Attached Files Context */}
+                <AttachedFilesContext threadId={threadId} />
 
                 {/* Messages / Streaming area */}
                 {(lastUserMessage || draftAnswer || result || error || thoughts.length > 0 || tools.length > 0) ? (

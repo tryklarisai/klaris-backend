@@ -429,7 +429,9 @@ export default function DashboardLayout() {
       }}>
         {/* Mobile menu button and page header */}
         <Box sx={{ 
-          p: 3, 
+          pt: 3,
+          pb: 4,
+          px: 3,
           borderBottom: '1px solid', 
           borderColor: 'divider',
           bgcolor: 'background.paper',
@@ -449,15 +451,17 @@ export default function DashboardLayout() {
                 <MenuIcon />
               </IconButton>
             )}
-            <Box>
-              <Typography variant="h5" fontWeight={600} sx={{ mb: 0.5 }}>
-                {pageInfo.title}
-              </Typography>
-              {pageInfo.description && (
-                <Typography variant="body2" color="text.secondary">
-                  {pageInfo.description}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, height: 32 }}>
+              <Box>
+                <Typography variant="h5" fontWeight={600}>
+                  {pageInfo.title}
                 </Typography>
-              )}
+                {pageInfo.description && (
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: -0.5 }}>
+                    {pageInfo.description}
+                  </Typography>
+                )}
+              </Box>
             </Box>
           </Box>
           {isMobile && (

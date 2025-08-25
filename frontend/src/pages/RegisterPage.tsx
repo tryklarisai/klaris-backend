@@ -145,7 +145,7 @@ export default function RegisterPage() {
                 {error}
               </Alert>
             )}
-            <form onSubmit={handleSubmit} noValidate>
+            <form onSubmit={handleSubmit} noValidate autoComplete="off">
               <TextField
                 fullWidth
                 margin="normal"
@@ -154,6 +154,7 @@ export default function RegisterPage() {
                 value={form.name}
                 onChange={handleChange}
                 required
+                autoComplete="off"
               />
               <TextField
                 fullWidth
@@ -179,6 +180,7 @@ export default function RegisterPage() {
                 value={form.root_user_name}
                 onChange={handleChange}
                 required
+                autoComplete="off"
               />
               <TextField
                 fullWidth
@@ -189,6 +191,7 @@ export default function RegisterPage() {
                 value={form.root_user_email}
                 onChange={handleChange}
                 required
+                autoComplete="off"
               />
               <TextField
                 fullWidth
@@ -199,6 +202,8 @@ export default function RegisterPage() {
                 value={form.root_user_password}
                 onChange={handleChange}
                 required
+                autoComplete="off"
+                inputProps={{ autoComplete: 'new-password' }}
                 helperText="Min. 8 characters, at least one letter, number, and symbol."
                 InputProps={{
                   endAdornment: (

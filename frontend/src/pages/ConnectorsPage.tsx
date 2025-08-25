@@ -250,7 +250,11 @@ export default function ConnectorsPage() {
             onClick={() => setShowGoogleDriveModal(true)}
           >
       {/* Google Drive Connector Name Modal */}
-      <Dialog open={showGoogleDriveModal} onClose={() => setShowGoogleDriveModal(false)} maxWidth="sm" fullWidth>
+      <Dialog open={showGoogleDriveModal} onClose={() => {
+        setShowGoogleDriveModal(false);
+        setGoogleDriveName("");
+        setGoogleDriveErr(null);
+      }} maxWidth="sm" fullWidth>
         <DialogTitle>Google Drive Connector</DialogTitle>
         <DialogContent>
           <TextField
@@ -261,12 +265,26 @@ export default function ConnectorsPage() {
             value={googleDriveName}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) => setGoogleDriveName(e.target.value)}
             required
+            autoComplete="off"
           />
           {googleDriveErr && <Alert severity="error" sx={{ mt: 1 }}>{googleDriveErr}</Alert>}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setShowGoogleDriveModal(false)}>Cancel</Button>
+          <Button 
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setShowGoogleDriveModal(false);
+              setGoogleDriveName("");
+              setGoogleDriveErr(null);
+            }}
+            variant="outlined"
+          >
+            Cancel
+          </Button>
           <LoadingButton
+            type="button"
             onClick={() => {
               setGoogleDriveErr(null);
               if (!googleDriveName.trim()) {
@@ -381,6 +399,8 @@ export default function ConnectorsPage() {
                   value={form.user}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm((f: typeof form) => ({ ...f, user: e.target.value }))}
                   required
+                  autoComplete="off"
+                  inputProps={{ autoComplete: 'new-password' }}
                 />
                 <TextField
                   label="password"
@@ -391,6 +411,8 @@ export default function ConnectorsPage() {
                   value={form.password}
                   onChange={(e: React.ChangeEvent<HTMLInputElement>) => setForm((f: typeof form) => ({ ...f, password: e.target.value }))}
                   required
+                  autoComplete="off"
+                  inputProps={{ autoComplete: 'new-password' }}
                 />
                 <TextField
                   label="host"

@@ -108,6 +108,7 @@ export default function LoginPage() {
                 value={form.email}
                 onChange={handleChange}
                 required
+                autoComplete="email"
               />
               <TextField
                 fullWidth
@@ -118,6 +119,7 @@ export default function LoginPage() {
                 value={form.password}
                 onChange={handleChange}
                 required
+                autoComplete="current-password"
                 InputProps={{
                   endAdornment: (
                     <InputAdornment position="end">

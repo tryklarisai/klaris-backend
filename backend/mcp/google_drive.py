@@ -161,7 +161,14 @@ class GoogleDriveMCPAdapter:
                             "id": f"{file_id}:{title}",
                             "name": f"{file_name} / {title}",
                             "kind": "sheet",
-                            "source": {"provider": "google_drive", "path": file_name},
+                            "source": {
+                                "provider": "google_drive", 
+                                "path": file_name,
+                                "type": "google_sheets",  # Mark as Google Sheets for frontend context
+                                "mime": mime,
+                                "total_rows": len(body_rows) if body_rows else 0,
+                                "total_columns": len(header) if header else 0
+                            },
                             "fields": fields,
                             "samples": [{"header": header, "rows": rows, "part": title}]
                         }
@@ -205,7 +212,14 @@ class GoogleDriveMCPAdapter:
                                 "id": f"{file_id}:{title}",
                                 "name": f"{file_name} / {title}",
                                 "kind": "sheet",
-                                "source": {"provider": "google_drive", "path": file_name},
+                                "source": {
+                                    "provider": "google_drive", 
+                                    "path": file_name,
+                                    "type": "excel",  # Mark as Excel for frontend context
+                                    "mime": mime,
+                                    "total_rows": len(df),  # Add metadata for chat context
+                                    "total_columns": len(df.columns)
+                                },
                                 "fields": [{"name": str(c), "type": "string"} for c in list(df.columns)],
                                 "samples": [{"header": list(df.columns), "rows": rows_df, "part": title}],
                             })
