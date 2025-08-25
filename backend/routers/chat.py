@@ -71,6 +71,55 @@ def _get_tenant_from_token(credentials: HTTPAuthorizationCredentials) -> UUID:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid tenant id in token")
 
 
+def _sanitize_chart_spec(spec: dict) -> dict | None:
+    """Whitelist and constrain a Vega-Lite spec for safety and size.
+    Returns a sanitized spec dict or None when rejected.
+    """
+    try:
+        if not isinstance(spec, dict):
+            return None
+        # Cap raw JSON size
+        try:
+            if len(json.dumps(spec)) > 120_000:
+                return None
+        except Exception:
+            return None
+
+        allowed_top = {
+            "$schema", "data", "mark", "encoding", "transform", "width", "height",
+            "layer", "vconcat", "hconcat", "facet", "resolve", "title", "autosize",
+        }
+        out = {k: v for k, v in spec.items() if isinstance(k, str) and k in allowed_top}
+
+        # Constrain data.values size if present
+        data = out.get("data")
+        if isinstance(data, dict) and isinstance(data.get("values"), list):
+            vals = data["values"]
+            if len(vals) > 5000:
+                vals = vals[:5000]
+            out["data"]["values"] = vals
+
+        # Normalize width/height
+        if out.get("width") is None:
+            out["width"] = "container"
+        if out.get("height") is None:
+            out["height"] = 280
+
+        # Only allow known transform ops
+        if isinstance(out.get("transform"), list):
+            safe_transforms = []
+            for t in out["transform"]:
+                if not isinstance(t, dict):
+                    continue
+                if any(k in t for k in ("aggregate", "bin", "fold", "filter", "calculate", "timeUnit", "window", "stack")):
+                    safe_transforms.append(t)
+            out["transform"] = safe_transforms[:6]
+
+        return out
+    except Exception:
+        return None
+
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(
     body: ChatRequest,

@@ -9,6 +9,8 @@ import sqlalchemy
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine.url import make_url
 import random
+import logging
+
 
 class PostgresMCPAdapter:
     @staticmethod
@@ -50,15 +52,19 @@ class PostgresMCPAdapter:
         Lightweight listing of user tables without fetching sample rows.
         Returns a list of {schema, table, name} where name is "schema.table".
         """
+       
         url = PostgresMCPAdapter._build_pg_url(config)
+        logging.info(f"url: {url}")
         engine = create_engine(url)
         inspector = inspect(engine)
         out: list[Dict[str, Any]] = []
         try:
             for schema in inspector.get_schema_names():
+                logging.info(f"schema: {schema}")
                 if schema.startswith("pg_") or schema == "information_schema":
                     continue
                 for table_name in inspector.get_table_names(schema=schema):
+                    logging.info(f"table_name: {table_name}")
                     out.append({
                         "schema": schema,
                         "table": table_name,

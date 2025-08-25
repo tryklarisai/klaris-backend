@@ -185,6 +185,7 @@ export default function ChatPage() {
             const charts = Array.isArray(data?.charts) ? data.charts : null;
             console.log('Chat final event:', { answer, route, data_preview, charts });
             setResult({ answer, route, data_preview, charts } as ChatResponse);
+            // Do not render charts yet; wait for 'done' event to mark completion
           } else if (type === 'error') {
             setError(String(data || 'Stream error'));
           } else if (type === 'done') {

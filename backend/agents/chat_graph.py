@@ -503,20 +503,36 @@ def _glossary_context_for_query(db: Session, tenant_id: UUID, query_text: str, t
 
 
 def _extract_chart_intent(message: str) -> Dict[str, Any]:
-    """Detect if user asked for a chart and infer desired type if hinted.
-    Returns { want_chart: bool, type_hint: Optional[str] } where type_hint in {bar,line,area,scatter}.
+    """Detect if user asked for a chart and infer desired type/options.
+    Returns { want_chart: bool, type_hint: Optional[str], stacked: bool, normalized: bool, grouped: bool }
+    type_hint in {bar,line,area,scatter,heatmap,histogram,boxplot,bubble}.
     """
     try:
         m = (message or "").lower()
-        want = any(k in m for k in ("chart", "plot", "graph", "visual", "visualize", "visualisation", "visualization"))
+        want = any(k in m for k in ("chart", "plot", "graph", "visual", "visualize", "visualisation", "visualization", "heatmap", "histogram", "boxplot", "box plot"))
         type_hint = None
-        for k in ("bar", "line", "area", "scatter"):
+        for k in ("heatmap", "histogram", "boxplot", "box plot", "bubble", "bar", "line", "area", "scatter"):
             if k in m:
-                type_hint = k
+                type_hint = "boxplot" if k in ("boxplot", "box plot") else ("scatter" if k == "bubble" else k)
                 break
-        return {"want_chart": want or (type_hint is not None), "type_hint": type_hint}
+        # Parse top-k like "top 5"
+        import re as _re
+        m_top = _re.search(r"top\s+(\d{1,3})", m)
+        top_k = int(m_top.group(1)) if m_top else None
+        # Rolling/smoothing like "7-day rolling" or "smooth"
+        m_roll = _re.search(r"(\d{2}|\d{1})[- ]?(day|week|wk|hour|hr)?\s+(rolling|moving|window)", m)
+        smooth_window = int(m_roll.group(1)) if m_roll else (7 if ("rolling" in m or "moving average" in m or "smooth" in m) else None)
+
+        opts = {
+            "stacked": any(w in m for w in ("stack", "stacked")),
+            "normalized": any(w in m for w in ("100%", "percent", "percentage", "normalized", "normalize")),
+            "grouped": any(w in m for w in ("grouped", "side-by-side", "side by side")),
+            "top_k": top_k,
+            "smooth_window": smooth_window,
+        }
+        return {"want_chart": want or (type_hint is not None), "type_hint": type_hint, **opts}
     except Exception:
-        return {"want_chart": False, "type_hint": None}
+        return {"want_chart": False, "type_hint": None, "stacked": False, "normalized": False, "grouped": False, "top_k": None, "smooth_window": None}
 
 
 def _is_numeric(value: Any) -> bool:
@@ -551,6 +567,9 @@ def _is_temporal(value: Any) -> bool:
     return False
 
 
+MAX_ROWS = 100
+MAX_SERIES = 8
+
 def _build_charts_from_preview(message: str, preview: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Build minimal Vega-Lite chart specs from data preview based on simple heuristics.
     Returns a list of { title?, type: 'vega-lite', spec }.
@@ -566,15 +585,23 @@ def _build_charts_from_preview(message: str, preview: Optional[Dict[str, Any]]) 
     if not intent.get("want_chart"):
         return []
 
+    # Guard rows and sample size
+    if len(rows) > MAX_ROWS:
+        rows = rows[:MAX_ROWS]
     # Infer column types by sampling
-    sample = rows[:50]
+    sample = rows[: min(50, MAX_ROWS)]
     num_cols: List[str] = []
     temporal_cols: List[str] = []
     cat_cols: List[str] = []
+    import re as _re
     for idx, col in enumerate(columns):
         col_values = [r[idx] for r in sample if isinstance(r, list) and len(r) > idx]
         num_count = sum(1 for v in col_values if _is_numeric(v))
         temp_count = sum(1 for v in col_values if _is_temporal(v))
+        name = str(col)
+        if _re.search(r"(\b|_)(id|uuid|email)(\b|_)", name, _re.I):
+            # skip id-like columns from x/series consideration
+            continue
         if num_count >= max(1, len(col_values) // 2):
             num_cols.append(str(col))
         elif temp_count >= max(1, len(col_values) // 2) or str(col).lower() in ("date", "day", "month", "year", "timestamp", "created_at", "updated_at"):
@@ -600,64 +627,209 @@ def _build_charts_from_preview(message: str, preview: Optional[Dict[str, Any]]) 
     def add_chart(spec: Dict[str, Any], title: Optional[str] = None):
         charts.append({"title": title, "type": "vega-lite", "spec": spec})
 
+    # --- Simple template helpers (consistent defaults/styles) ---
+    def _vl_base(values: List[Dict[str, Any]], mark: Dict[str, Any] | str, encoding: Dict[str, Any], transforms: List[Dict[str, Any]] | None = None) -> Dict[str, Any]:
+        spec: Dict[str, Any] = {
+            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+            "data": {"values": values},
+            "mark": mark if isinstance(mark, dict) else {"type": str(mark), "tooltip": True},
+            "encoding": encoding,
+            "width": "container",
+            "height": 280,
+        }
+        if transforms:
+            spec["transform"] = transforms
+        return spec
+
+    def build_line(values: List[Dict[str, Any]], x: str, y: str, series: Optional[str] = None, transforms: List[Dict[str, Any]] | None = None, area: bool = False, y_title: Optional[str] = None) -> Dict[str, Any]:
+        enc: Dict[str, Any] = {
+            "x": {"field": x, "type": "temporal"},
+            "y": {"field": y, "type": "quantitative"},
+        }
+        if y_title:
+            enc["y"]["title"] = y_title
+        if series:
+            enc["color"] = {"field": series, "type": "nominal"}
+        return _vl_base(values, {"type": ("area" if area else "line"), "tooltip": True}, enc, transforms)
+
+    def build_bar(values: List[Dict[str, Any]], x: str, y: str, series: Optional[str] = None, transforms: List[Dict[str, Any]] | None = None, stacked: Optional[str | bool] = None, column_facet: Optional[str] = None, y_title: Optional[str] = None) -> Dict[str, Any]:
+        enc: Dict[str, Any] = {
+            "x": {"field": x, "type": "nominal"},
+            "y": {"field": y, "type": "quantitative"},
+        }
+        if y_title:
+            enc["y"]["title"] = y_title
+        if stacked is not None:
+            enc["y"]["stack"] = stacked
+        if series:
+            enc["color"] = {"field": series, "type": "nominal"}
+        spec = _vl_base(values, {"type": "bar", "tooltip": True}, enc, transforms)
+        if column_facet:
+            spec["column"] = {"field": column_facet, "type": "nominal"}
+        return spec
+
+    def build_scatter(values: List[Dict[str, Any]], x: str, y: str, size: Optional[str] = None, transforms: List[Dict[str, Any]] | None = None, y_title: Optional[str] = None) -> Dict[str, Any]:
+        enc: Dict[str, Any] = {
+            "x": {"field": x, "type": "quantitative"},
+            "y": {"field": y, "type": "quantitative"},
+        }
+        if y_title:
+            enc["y"]["title"] = y_title
+        if size:
+            enc["size"] = {"field": size, "type": "quantitative"}
+        return _vl_base(values, {"type": "point", "tooltip": True}, enc, transforms)
+
+    def build_hist(values: List[Dict[str, Any]], x: str) -> Dict[str, Any]:
+        enc = {
+            "x": {"field": x, "bin": True, "type": "quantitative"},
+            "y": {"aggregate": "count", "type": "quantitative", "title": "Count"},
+        }
+        return _vl_base(values, {"type": "bar", "tooltip": True}, enc)
+
+    def build_heatmap(values: List[Dict[str, Any]], x: str, y: str, transforms: List[Dict[str, Any]]) -> Dict[str, Any]:
+        enc = {
+            "x": {"field": x, "type": "nominal"},
+            "y": {"field": y, "type": "nominal"},
+            "color": {"field": "value", "type": "quantitative"},
+        }
+        return _vl_base(values, {"type": "rect", "tooltip": True}, enc, transforms)
+
     # Prefer temporal line/area when available
     if temporal_cols and num_cols:
         x = temporal_cols[0]
-        nums = num_cols[:4]  # cap series
+        nums = num_cols[:MAX_SERIES]
+        transforms: List[Dict[str, Any]] = []
+        enc_y_field = None
         if len(nums) > 1:
             # Fold to long for multi-series
-            spec = {
-                "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-                "data": {"values": values},
-                "transform": [{"fold": nums, "as": ["series", "value"]}],
-                "mark": {"type": ("area" if type_hint == "area" else "line"), "tooltip": True},
-                "encoding": {
-                    "x": {"field": x, "type": "temporal"},
-                    "y": {"field": "value", "type": "quantitative"},
-                    "color": {"field": "series", "type": "nominal"}
-                }
-            }
+            transforms.append({"fold": nums, "as": ["series", "value"]})
+            # Coerce numeric strings before aggregating
+            transforms.append({"calculate": "toNumber(datum['value'])", "as": "value_num"})
+            # Aggregate per period/series (sum)
+            transforms.append({"aggregate": [{"op": "sum", "field": "value_num", "as": "metric"}], "groupby": [x, "series"]})
+            # Rolling smoothing if asked
+            if intent.get("smooth_window"):
+                transforms.append({
+                    "window": [{"op": "mean", "field": "metric", "as": "metric_smooth"}],
+                    "frame": [-(int(intent.get("smooth_window")) - 1), 0],
+                    "groupby": ["series"],
+                    "sort": [{"field": x}]
+                })
+                enc_y_field = "metric_smooth"
+            else:
+                enc_y_field = "metric"
         else:
-            spec = {
-                "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-                "data": {"values": values},
-                "mark": {"type": ("area" if type_hint == "area" else "line"), "tooltip": True},
-                "encoding": {
-                    "x": {"field": x, "type": "temporal"},
-                    "y": {"field": nums[0], "type": "quantitative"}
-                }
-            }
+            # Coerce numeric strings then aggregate per period
+            transforms.append({"calculate": f"toNumber(datum['{nums[0]}'])", "as": "metric_src"})
+            transforms.append({"aggregate": [{"op": "sum", "field": "metric_src", "as": "metric"}], "groupby": [x]})
+            if intent.get("smooth_window"):
+                transforms.append({
+                    "window": [{"op": "mean", "field": "metric", "as": "metric_smooth"}],
+                    "frame": [-(int(intent.get("smooth_window")) - 1), 0],
+                    "sort": [{"field": x}]
+                })
+                enc_y_field = "metric_smooth"
+            else:
+                enc_y_field = "metric"
+        # Y-axis title
+        y_title = None
+        if len(nums) == 1:
+            y_title = str(nums[0])
+        elif len(nums) > 1:
+            y_title = "Sum"
+        spec = build_line(values, x=x, y=enc_y_field or "metric", series=("series" if len(nums) > 1 else None), transforms=transforms, area=(type_hint == "area"), y_title=y_title)
+        add_chart(spec, title=None)
+        return charts
+
+    # Temporal count (no numeric present) → line/area of counts by period
+    if temporal_cols and not num_cols:
+        x = temporal_cols[0]
+        spec = _vl_base(values, {"type": ("area" if type_hint == "area" else "line"), "tooltip": True}, {
+            "x": {"field": x, "type": "temporal", "timeUnit": "yearmonthdate"},
+            "y": {"aggregate": "count", "type": "quantitative", "title": "Count"}
+        })
+        add_chart(spec, title=None)
+        return charts
+
+    # Histogram of a single numeric column
+    if intent.get("type_hint") in ("histogram", "density") and num_cols:
+        x = num_cols[0]
+        spec = build_hist(values, x)
+        add_chart(spec, title=None)
+        return charts
+
+    # Heatmap for two categorical (or binned) axes
+    if intent.get("type_hint") == "heatmap" and (len(cat_cols) + len(temporal_cols)) >= 2:
+        ax = (cat_cols + temporal_cols)
+        x = ax[0]
+        y = ax[1]
+        spec = build_heatmap(values, x, y, transforms=[{"aggregate": [{"op": "count", "as": "value"}], "groupby": [x, y]}])
         add_chart(spec, title=None)
         return charts
 
     # Scatter if user asked and we have 2 numeric columns
     if type_hint == "scatter" and len(num_cols) >= 2:
         x, y = num_cols[0], num_cols[1]
-        spec = {
-            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-            "data": {"values": values},
-            "mark": {"type": "point", "tooltip": True},
-            "encoding": {
-                "x": {"field": x, "type": "quantitative"},
-                "y": {"field": y, "type": "quantitative"}
-            }
-        }
+        spec = build_scatter(values, x, y, size=(num_cols[2] if (len(num_cols) >= 3 and intent.get("type_hint") == "bubble") else None), y_title=str(y))
         add_chart(spec, title=None)
         return charts
 
-    # Bar for categorical + numeric
+    # Bar for categorical + numeric (supports grouped/stacked/normalized)
     if cat_cols and num_cols:
         x = cat_cols[0]
+        # If multiple numeric measures and no natural series, emit separate charts per measure (instead of folding)
+        if len(num_cols) >= 2 and not (len(cat_cols) >= 2):
+            for measure in num_cols[:MAX_SERIES]:
+                transforms: List[Dict[str, Any]] = []
+                transforms.append({"calculate": f"toNumber(datum['{measure}'])", "as": "metric_src"})
+                transforms.append({"aggregate": [{"op": "sum", "field": "metric_src", "as": "metric"}], "groupby": [x]})
+                # Top-K
+                if intent.get("top_k"):
+                    transforms.append({
+                        "window": [{"op": "rank", "as": "rank"}],
+                        "sort": [{"field": "metric", "order": "descending"}],
+                    })
+                    transforms.append({"filter": f"datum.rank <= {int(intent['top_k'])}"})
+                stacked = "normalize" if intent.get("normalized") else (True if intent.get("stacked") else None)
+                spec = build_bar(values, x=x, y="metric", series=None, transforms=transforms, stacked=stacked, y_title=str(measure))
+                add_chart(spec, title=str(measure))
+            return charts
+        # Otherwise, single measure or natural series present
+        series: Optional[str] = None
+        transforms: List[Dict[str, Any]] = []
+        if len(cat_cols) >= 2:
+            series = cat_cols[1]
         y = num_cols[0]
-        spec = {
-            "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-            "data": {"values": values},
-            "mark": {"type": "bar", "tooltip": True} if (type_hint in (None, "bar")) else {"type": "bar", "tooltip": True},
-            "encoding": {
-                "x": {"field": x, "type": "nominal", "sort": "-y"},
-                "y": {"field": y, "type": "quantitative"}
-            }
+        transforms.append({"calculate": f"toNumber(datum['{y}'])", "as": "metric_src"})
+        transforms.append({
+            "aggregate": [{"op": "sum", "field": "metric_src", "as": "metric"}],
+            "groupby": [x] + ([series] if series else []),
+        })
+        # Top-K
+        if intent.get("top_k"):
+            transforms.append({
+                "window": [{"op": "rank", "as": "rank"}],
+                "sort": [{"field": "metric", "order": "descending"}],
+                **({"groupby": [series]} if series else {})
+            })
+            transforms.append({"filter": f"datum.rank <= {int(intent['top_k'])}"})
+        enc: Dict[str, Any] = {
+            "x": {"field": x, "type": "nominal"},
+            "y": {"field": "metric", "type": "quantitative", "title": str(y)},
         }
+        if series and intent.get("grouped"):
+            spec = build_bar(values, x=x, y="metric", series=series, transforms=transforms, column_facet=series, y_title=str(y))
+            add_chart(spec, title=None)
+            return charts
+        stacked = "normalize" if intent.get("normalized") else (True if intent.get("stacked") else None)
+        spec = build_bar(values, x=x, y="metric", series=series, transforms=transforms, stacked=stacked, y_title=str(y))
+        add_chart(spec, title=None)
+        return charts
+
+    # Pure categorical → count per category bar
+    if cat_cols and not num_cols:
+        x = cat_cols[0]
+        spec = build_bar(values, x=x, y="count", transforms=[{"aggregate": [{"op": "count", "as": "count"}], "groupby": [x]}], y_title="Count")
         add_chart(spec, title=None)
         return charts
 
@@ -670,7 +842,7 @@ def _build_charts_from_preview(message: str, preview: Optional[Dict[str, Any]]) 
             "mark": {"type": "point", "tooltip": True},
             "encoding": {
                 "x": {"field": x, "type": "quantitative"},
-                "y": {"field": y, "type": "quantitative"}
+                "y": {"field": y, "type": "quantitative", "title": str(y)}
             }
         }
         add_chart(spec, title=None)
@@ -723,7 +895,9 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
         "Then outline a short, structured plan of the logical steps you will follow. "
         "As you execute tool calls, narrate progress succinctly and sequentially. "
         "Finish by summarizing the completed work distinctly from your upfront plan. "
-        "If the user asks for a chart/graph/plot, you MUST run the appropriate read tool(s) to produce a compact table (e.g., period vs metric) suitable for plotting, with small LIMITs. "
+        "If the user asks for a chart/graph/plot, you MUST run read tool(s) to produce a compact aggregated table suitable for plotting, with small LIMITs. "
+        "Charts Result Contract: ONLY return aggregated tables in one of these shapes: [x, y] or [x, series, value]. x is categorical or temporal; y/value is numeric. Use GROUP BY x[, series]. "
+        "Never return entity-level rows (ids, emails, uuids) for chart requests. Prefer top-k and short time buckets to keep results small (≤ 100 rows, ≤ 8 series). "
         "Do NOT say that you cannot create charts; the application will render charts from your tabular result. "
         "For time ranges like 'last 3 quarters', compute those periods and aggregate accordingly. "
         "After gathering, produce a concise final answer to the user. Do not output JSON; respond with natural language."
@@ -735,8 +909,24 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
 
     def _on_rows(connector_id: str, connector_type: str, columns: List[Any], rows: List[List[Any]]) -> None:
         nonlocal data_preview, route_meta
-        if data_preview is None:
+        # Prefer the preview with more numeric columns (better chance to chart multiple series)
+        try:
+            def count_numeric(cols: List[Any], rs: List[List[Any]]) -> int:
+                sample = rs[:50]
+                cnt = 0
+                for idx, _c in enumerate(cols or []):
+                    col_values = [r[idx] for r in sample if isinstance(r, list) and len(r) > idx]
+                    num_count = sum(1 for v in col_values if _is_numeric(v))
+                    if num_count >= max(1, len(col_values) // 2):
+                        cnt += 1
+                return cnt
+            incoming_numeric = count_numeric(columns or [], rows or [])
+            current_numeric = count_numeric((data_preview or {}).get("columns") or [], (data_preview or {}).get("rows") or []) if data_preview else -1
+        except Exception:
+            incoming_numeric, current_numeric = 0, -1
+        if data_preview is None or incoming_numeric > current_numeric or (incoming_numeric == current_numeric and len(columns or []) > len((data_preview or {}).get("columns") or [])):
             data_preview = {"columns": columns, "rows": rows[:50]}
+        if route_meta is None:
             route_meta = {"tool": "read", "connector_id": str(connector_id), "connector_type": connector_type}
         previews.append({
             "connector_id": str(connector_id),
@@ -863,6 +1053,7 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
                 pass
 
     usage_cb = _UsageCapture()
+    # Retry removed per pilot: keep streaming simple and responsive
 
     charts_payload: Optional[List[Dict[str, Any]]] = None
     try:
@@ -1008,7 +1199,27 @@ async def run_chat_agent_stream(db: Session, tenant_id: UUID, message: str, thre
                 try:
                     charts_payload = _build_charts_from_preview(message, data_preview)
                     if charts_payload:
-                        payload["charts"] = charts_payload
+                        # Sanitize specs before sending
+                        sanitized: List[Dict[str, Any]] = []
+                        for c in charts_payload:
+                            spec = c.get("spec") if isinstance(c, dict) else None
+                            try:
+                                # local sanitizer
+                                allowed_top = {"$schema","data","mark","encoding","width","height","transform","layer","vconcat","hconcat","title","resolve","facet","autosize"}
+                                if not (isinstance(spec, dict)):
+                                    continue
+                                if len(json.dumps(spec)) > 120_000:
+                                    continue
+                                spec = {k:v for k,v in spec.items() if isinstance(k,str) and k in allowed_top}
+                                if spec.get("width") is None:
+                                    spec["width"] = "container"
+                                if spec.get("height") is None:
+                                    spec["height"] = 280
+                                sanitized.append({"title": c.get("title"), "type": "vega-lite", "spec": spec})
+                            except Exception:
+                                continue
+                        if sanitized:
+                            payload["charts"] = sanitized
                 except Exception:
                     charts_payload = None
                 yield f"event: final\ndata: {json.dumps(payload)}\n\n"
