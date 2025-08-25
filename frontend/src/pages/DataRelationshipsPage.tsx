@@ -541,60 +541,96 @@ export default function DataRelationshipsPage() {
   }
 
   return (
-    <Box>
+    <Box sx={{ p: 3 }}>
+      <Typography variant="h4" sx={{ mb: 3, fontWeight: 600 }}>Data Relationships</Typography>
       {loading ? <CircularProgress /> : error ? <Alert severity="error">{error}</Alert> : (
         <>
-          <Accordion defaultExpanded>
-            <AccordionSummary expandIcon={<ExpandMoreIcon />}>Schema</AccordionSummary>
+          <Accordion defaultExpanded sx={{ mb: 2 }}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography variant="h6" sx={{ fontWeight: 500 }}>Schemas</Typography>
+            </AccordionSummary>
             <AccordionDetails>
-              <List>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Select the schemas you want to analyze for relationships:
+              </Typography>
+              <Stack spacing={1}>
                 {connectors.map((c) => (
-                  <ListItem key={c.connector_id}>
-                    <Checkbox
-                      checked={selectedConnectorIds.includes(c.connector_id)}
-                      onChange={(e) => {
-                        setSelectedConnectorIds((ids) => e.target.checked ? [...ids, c.connector_id] : ids.filter(id => id !== c.connector_id));
-                      }}
-                    />
-                    <ListItemText
-                      primary={c.name || `${c.type} Connector`}
-                      secondary={(() => {
-                        const ts = c.last_schema_fetch ? formatLocalDatetime(c.last_schema_fetch) : 'Never';
-                        const status = c.status || 'unknown';
-                        return `${status} • Last fetched: ${ts}`;
-                      })()}
-                    />
-                  </ListItem>
+                  <Paper key={c.connector_id} variant="outlined" sx={{ p: 2 }}>
+                    <Stack direction="row" alignItems="center" spacing={2}>
+                      <Checkbox
+                        checked={selectedConnectorIds.includes(c.connector_id)}
+                        onChange={(e) => {
+                          setSelectedConnectorIds((ids) => e.target.checked ? [...ids, c.connector_id] : ids.filter(id => id !== c.connector_id));
+                        }}
+                      />
+                      <Box sx={{ flexGrow: 1 }}>
+                        <Typography variant="subtitle1" sx={{ fontWeight: 500 }}>
+                          {c.name || `${c.type} Connector`}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          {(() => {
+                            const ts = c.last_schema_fetch ? formatLocalDatetime(c.last_schema_fetch) : 'Never';
+                            const status = c.status || 'unknown';
+                            return `Status: ${status} • Last fetched: ${ts}`;
+                          })()
+                          }
+                        </Typography>
+                      </Box>
+                      <Chip 
+                        label={c.status || 'unknown'} 
+                        size="small" 
+                        color={c.status === 'active' ? 'success' : 'default'}
+                      />
+                    </Stack>
+                  </Paper>
                 ))}
-              </List>
-            </AccordionDetails>
-          </Accordion>
-
-          <Accordion defaultExpanded>
-            <AccordionSummary expandIcon={<ExpandMoreIcon />}>Enrich with AI</AccordionSummary>
-            <AccordionDetails>
-              <Stack direction="row" spacing={1} alignItems="center">
-                <Button variant="contained" onClick={runEnrich} disabled={reviewLoading || selectedConnectorIds.length === 0}>
-                  {reviewLoading ? 'Enriching…' : 'Start Enrich'}
-                </Button>
               </Stack>
-              {reviewError && <Alert severity="error" sx={{ mt: 1 }}>{reviewError}</Alert>}
             </AccordionDetails>
           </Accordion>
 
-          <Accordion defaultExpanded>
-            <AccordionSummary expandIcon={<ExpandMoreIcon />}>Results</AccordionSummary>
+          <Accordion defaultExpanded sx={{ mb: 2 }}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography variant="h6" sx={{ fontWeight: 500 }}>Enrich with AI</Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <Box sx={{ mb: 2 }}>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  Use AI to automatically discover relationships between your selected schemas.
+                </Typography>
+                <Stack direction="row" spacing={2} alignItems="center">
+                  <Button 
+                    variant="contained" 
+                    size="large"
+                    onClick={runEnrich} 
+                    disabled={reviewLoading || selectedConnectorIds.length === 0}
+                    sx={{ px: 4, py: 1.5 }}
+                  >
+                    {reviewLoading ? 'Enriching…' : 'Start AI Enrichment'}
+                  </Button>
+                  {selectedConnectorIds.length === 0 && (
+                    <Typography variant="body2" color="warning.main">
+                      Please select at least one schema above
+                    </Typography>
+                  )}
+                </Stack>
+              </Box>
+              {reviewError && <Alert severity="error" sx={{ mt: 2 }}>{reviewError}</Alert>}
+            </AccordionDetails>
+          </Accordion>
+
+          <Accordion defaultExpanded sx={{ mb: 2 }}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography variant="h6" sx={{ fontWeight: 500 }}>Results</Typography>
+            </AccordionSummary>
             <AccordionDetails>
               {reviewLoading || savedCanonicalLoading ? (
                 <Box display="flex" justifyContent="center" py={2}><CircularProgress /></Box>
               ) : reviewData ? (
                 <>
-                  <Typography variant="subtitle2">Preview (AI Suggestions)</Typography>
-                  <Box sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
-                    <Box sx={{ p: 1.5 }}>
-                      <JsonView src={reviewData?.suggestions || {}} theme="github" collapsed={1} enableClipboard />
-                    </Box>
-                  </Box>
+                  <Typography variant="h6" sx={{ mb: 2, fontWeight: 500 }}>AI Suggestions Preview</Typography>
+                  <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+                    <JsonView src={reviewData?.suggestions || {}} theme="github" collapsed={1} enableClipboard />
+                  </Paper>
                   <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
                     <Button variant="outlined" onClick={saveGlobalCanonical} disabled={canonicalSaving}>
                       {canonicalSaving ? 'Saving…' : 'Publish Global Canonical'}
@@ -615,9 +651,11 @@ export default function DataRelationshipsPage() {
                 </>
               ) : savedCanonical ? (
                 <>
-                  <Typography variant="subtitle2">Entities {savedCanonicalVersion ? `(v${savedCanonicalVersion})` : ''}</Typography>
+                  <Typography variant="h6" sx={{ mb: 2, fontWeight: 500 }}>
+                    Entities {savedCanonicalVersion ? `(Version ${savedCanonicalVersion})` : ''}
+                  </Typography>
                   <EntitiesTable entities={savedCanonical?.entities || []} />
-                  <Typography variant="subtitle2" sx={{ mt: 2 }}>Relationships</Typography>
+                  <Typography variant="h6" sx={{ mt: 3, mb: 2, fontWeight: 500 }}>Relationships</Typography>
                   <RelationshipsTable rels={savedCanonical?.relationships || []} />
                   <Stack direction="row" spacing={1} sx={{ mt: 1 }}>
                     <Button variant="contained" onClick={beginEdit}>Edit Canonical</Button>
@@ -641,8 +679,10 @@ export default function DataRelationshipsPage() {
             </AccordionDetails>
           </Accordion>
 
-          <Accordion>
-            <AccordionSummary expandIcon={<ExpandMoreIcon />}>Search Index</AccordionSummary>
+          <Accordion sx={{ mb: 2 }}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Typography variant="h6" sx={{ fontWeight: 500 }}>Search Index</Typography>
+            </AccordionSummary>
             <AccordionDetails>
               <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
                 <TextField size="small" placeholder="Search query" value={searchQ} onChange={(e) => setSearchQ(e.target.value)} sx={{ minWidth: 360 }} />
@@ -684,12 +724,14 @@ export default function DataRelationshipsPage() {
           </Accordion>
 
           {draftCanonical && (
-            <Accordion defaultExpanded>
-              <AccordionSummary expandIcon={<ExpandMoreIcon />}>Editor</AccordionSummary>
+            <Accordion defaultExpanded sx={{ mb: 2 }}>
+              <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+                <Typography variant="h6" sx={{ fontWeight: 500 }}>Editor</Typography>
+              </AccordionSummary>
               <AccordionDetails>
-                <Typography variant="subtitle2">Draft Entities</Typography>
+                <Typography variant="h6" sx={{ mb: 2, fontWeight: 500 }}>Draft Entities</Typography>
                 <EditableEntitiesTable entities={draftCanonical?.entities || []} />
-                <Typography variant="subtitle2" sx={{ mt: 2 }}>Draft Relationships</Typography>
+                <Typography variant="h6" sx={{ mt: 3, mb: 2, fontWeight: 500 }}>Draft Relationships</Typography>
                 <EditableRelationshipsTable rels={draftCanonical?.relationships || []} />
                 {validateErrors && validateErrors.length > 0 && (
                   <Alert severity="error" sx={{ mt: 1 }}>
